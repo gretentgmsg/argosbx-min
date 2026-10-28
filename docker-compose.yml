@@ -21,6 +21,7 @@ services:
       ARGO: "0"                  # 1 = enable
       ARGO_TOKEN: ""             # empty = quick tunnel (random *.trycloudflare.com, changes on every restart)
       ARGO_DOMAIN: ""            # required with ARGO_TOKEN: the public hostname you set in the Cloudflare dashboard
+      # ARGO_PROTOCOL: "http2"   # 国内/UDP受限网络建议开启：QUIC 到 Cloudflare 劣化会导致隧道时通时断
       # ARGO_ADDRESS: ""         # optional: preferred Cloudflare IP/domain used by the client to connect
       # HY2_PASSWORD / HY2_OBFS_PASSWORD / REALITY_UUID / ARGO_UUID: optional, random values are generated if unset
     volumes:

@@ -2,3 +2,5 @@
 AiSuggest/
 data/
 *.log
+测试/
+.env

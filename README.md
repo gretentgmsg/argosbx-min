@@ -62,6 +62,8 @@ HY2_PORT=0  REALITY_PORT=0  ARGO=1
 - **临时隧道**：不用账号，启动后 `links.txt` 里会出现 `*.trycloudflare.com` 的节点；每次重启域名都会变，适合临时使用。
 - **固定隧道**（推荐）：Cloudflare Zero Trust → Networks → Tunnels → 创建隧道，复制 token；在 Public hostname 里填你的域名，Service 选 `HTTP`，URL 填 `localhost:18080`；然后设置 `ARGO_TOKEN` 和 `ARGO_DOMAIN`。
 
+**国内 / UDP 受限网络必读**：cloudflared 默认 `ARGO_PROTOCOL=auto`（优先 QUIC/UDP）。若你的网络 UDP 到 Cloudflare 劣化（症状：隧道时通时断、真连接测试超时但偶发能通、容器日志反复出现 `failed to accept QUIC stream: timeout`），请设置 `ARGO_PROTOCOL=http2` 强制走 TCP 443，实测可解决。另外：把代理服务端跑在墙内网络时，`v2rayN 真连接测试`（默认目标 www.google.com）必然失败——出口在墙内，请用国内可达站点（如 baidu.com）测试。
+
 Argo 路径使用 VMess-WS（aes-128-gcm 端到端加密，Cloudflare 看不到内容），路径为随机值，只有拿到链接的人能访问。UDP 无法通过 Argo，所以 HY2 不能走隧道。
 Xray 已把 WebSocket 传输和 VMess 标记为弃用，升级 Xray 大版本前请先看发布说明。
 
