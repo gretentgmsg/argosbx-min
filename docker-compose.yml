@@ -1,0 +1,41 @@
+services:
+  proxy:
+    build: .                       # or: image: ghcr.io/gretentgmsg/argosbx:latest  (built by .github/workflows/docker.yml)
+    image: hy2-reality-min
+    container_name: proxy
+    restart: unless-stopped
+    # Direct access needs a reachable public IP. For Argo-only (NAT / no public IP) delete this whole `ports` block
+    # and set HY2_PORT=0, REALITY_PORT=0, ARGO=1: the container then only makes outbound connections.
+    ports:
+      - "443:443/udp"    # Hysteria2
+      - "443:443/tcp"    # VLESS-Reality
+    environment:
+      SERVER_HOST: ""            # your public IP or domain; empty = auto-detect over HTTPS (api.ipify.org)
+      NODE_NAME: "node"
+      HY2_PORT: "443"            # 0 = disable
+      HY2_SNI: "www.bing.com"    # self-signed cert SAN; use your real domain if you mount a real cert
+      HY2_OBFS: "1"              # 1 = salamander obfuscation (recommended)
+      REALITY_PORT: "443"        # 0 = disable
+      REALITY_SNI: "addons.mozilla.org"
+      # --- Cloudflare Argo tunnel (VMess-WS behind cloudflared; needs no inbound port) ---
+      ARGO: "0"                  # 1 = enable
+      ARGO_TOKEN: ""             # empty = quick tunnel (random *.trycloudflare.com, changes on every restart)
+      ARGO_DOMAIN: ""            # required with ARGO_TOKEN: the public hostname you set in the Cloudflare dashboard
+      # ARGO_ADDRESS: ""         # optional: preferred Cloudflare IP/domain used by the client to connect
+      # HY2_PASSWORD / HY2_OBFS_PASSWORD / REALITY_UUID / ARGO_UUID: optional, random values are generated if unset
+    volumes:
+      - proxy-data:/data         # secrets, certificate, configs, links.txt (mode 600)
+    # --- hardening ---
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0   # lets the non-root user bind 443 without any capability
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
+
+volumes:
+  proxy-data:
