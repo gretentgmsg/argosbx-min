@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Minimal launcher: Hysteria2 (sing-box) + VLESS-Reality (Xray) + optional Cloudflare Argo tunnel (VMess-WS via Xray).
+# Minimal launcher: Hysteria2 (sing-box) + VLESS-Reality (Xray) + optional Cloudflare Argo tunnel (VLESS Encryption + XHTTP via Xray).
 # Secrets are generated locally on first start and persisted in $DATA_DIR (mode 600).
 set -euo pipefail
 umask 077
@@ -14,7 +14,7 @@ MASQ_URL="${MASQ_URL:-https://www.bing.com}"
 REALITY_PORT="${REALITY_PORT:-443}"      # TCP; 0 = disable Reality
 REALITY_SNI="${REALITY_SNI:-addons.mozilla.org}"
 ARGO="${ARGO:-0}"                        # 1 = enable Cloudflare Argo tunnel (works without a reachable public IP)
-ARGO_PORT="${ARGO_PORT:-18080}"          # local-only (127.0.0.1) VMess-WS port that cloudflared forwards to
+ARGO_PORT="${ARGO_PORT:-18080}"          # local-only (127.0.0.1) VLESS-XHTTP port that cloudflared forwards to
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"           # fixed tunnel: the public hostname configured in the Cloudflare dashboard
 ARGO_ADDRESS="${ARGO_ADDRESS:-}"         # optional: preferred Cloudflare IP/domain for the client to connect to
 ARGO_PROTOCOL="${ARGO_PROTOCOL:-auto}"   # auto | http2 | quic
@@ -156,7 +156,7 @@ JSON
   echo "hysteria2://$HY2_PW@$URL_HOST:$HY2_PORT/?$Q#$NODE_NAME-hy2" >> "$LINKS"
 fi
 
-# ======================= Xray: VLESS-Reality and/or VMess-WS (Argo origin) =======================
+# ======================= Xray: VLESS-Reality and/or VLESS-Encryption+XHTTP (Argo origin) =======================
 XRAY_INBOUNDS=""
 if [ "$REALITY_PORT" != 0 ]; then
   PRIV_FILE="$DATA_DIR/secrets/reality_private"
@@ -193,15 +193,25 @@ JSON
 fi
 
 if [ "$ARGO" = 1 ]; then
-  WS_PATH="/$(secret argo_path 8)"          # random path: only clients that know it reach the proxy
+  XH_PATH="/$(secret argo_path 8)"          # random path: only clients that know it reach the proxy
+  # VLESS Encryption key pair (X25519 authentication + ML-KEM-768 post-quantum key exchange), generated once by Xray itself.
+  # "decryption" is the server secret, "encryption" is the public client string.
+  if [ ! -s "$DATA_DIR/secrets/argo_dec" ] || [ ! -s "$DATA_DIR/secrets/argo_enc" ]; then
+    VE="$("$BIN_DIR/xray" vlessenc)"
+    printf '%s\n' "$VE" | awk -F'"' '/^Authentication:/ {on = ($0 ~ /X25519/)} on && /"decryption"/ {printf "%s", $4; exit}' > "$DATA_DIR/secrets/argo_dec"
+    printf '%s\n' "$VE" | awk -F'"' '/^Authentication:/ {on = ($0 ~ /X25519/)} on && /"encryption"/ {printf "%s", $4; exit}' > "$DATA_DIR/secrets/argo_enc"
+  fi
+  ARGO_DEC="$(tr -d '\n' < "$DATA_DIR/secrets/argo_dec")"; ARGO_ENC="$(tr -d '\n' < "$DATA_DIR/secrets/argo_enc")"
+  RE='^mlkem768x25519plus\.(native|xorpub|random)\.[0-9a-z]+\.[A-Za-z0-9_-]+$'
+  [[ "$ARGO_DEC" =~ $RE && "$ARGO_ENC" =~ $RE ]] || die "could not read VLESS Encryption keys from 'xray vlessenc' (delete $DATA_DIR/secrets/argo_dec and argo_enc to regenerate)"
   ARGO_IN="$(cat <<JSON
     {
       "tag": "argo-in",
       "listen": "127.0.0.1",
       "port": $ARGO_PORT,
-      "protocol": "vmess",
-      "settings": { "clients": [ { "id": "$ARGO_ID" } ] },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "$WS_PATH" } }
+      "protocol": "vless",
+      "settings": { "clients": [ { "id": "$ARGO_ID" } ], "decryption": "$ARGO_DEC" },
+      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$XH_PATH", "mode": "auto" } }
     }
 JSON
 )"
@@ -235,13 +245,12 @@ JSON
   "$BIN_DIR/xray" run -test -c "$DATA_DIR/xray.json" >/dev/null
 fi
 
-# VMess link for the Argo path. VMess encrypts end to end (aes-128-gcm), so Cloudflare, which terminates TLS, cannot read the payload.
+# VLESS link for the Argo path. VLESS Encryption is end to end (forward secret, post-quantum key exchange), so Cloudflare,
+# which terminates TLS, only sees ciphertext. mode=packet-up is the XHTTP mode that works through a CDN / HTTP origin.
 argo_link() { # tunnel-domain
-  local d="$1" addr json
+  local d="$1" addr
   addr="${ARGO_ADDRESS:-$d}"
-  json="$(printf '{"v":"2","ps":"%s","add":"%s","port":"443","id":"%s","aid":"0","scy":"aes-128-gcm","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s","alpn":"","fp":"chrome"}' \
-        "$NODE_NAME-argo" "$addr" "$ARGO_ID" "$d" "$WS_PATH" "$d")"
-  echo "vmess://$(printf '%s' "$json" | base64 -w0)" >> "$LINKS"
+  echo "vless://$ARGO_ID@$addr:443?encryption=$ARGO_ENC&security=tls&sni=$d&fp=chrome&alpn=h2&type=xhttp&host=$d&path=%2F${XH_PATH#/}&mode=packet-up#$NODE_NAME-argo" >> "$LINKS"
 }
 [ "$ARGO" = 1 ] && [ -n "$CF_TOKEN" ] && argo_link "$ARGO_DOMAIN"
 
@@ -277,6 +286,7 @@ if [ "$ARGO" = 1 ] && [ "$FIXED_TUNNEL" = 0 ]; then
   done
   if [ -n "$QDOM" ]; then argo_link "$QDOM"; echo "[ok] Argo quick tunnel is up; link added to $LINKS (domain changes on every restart)"
   else echo "[warn] could not obtain a quick-tunnel hostname yet; check outbound access to Cloudflare" >&2; fi
+  echo "[warn] quick tunnels (*.trycloudflare.com) are served through a Cloudflare Worker that breaks XHTTP's streaming download: requests reach this server but no data returns to the client. Use a fixed tunnel (ARGO_TOKEN + ARGO_DOMAIN)." >&2
 fi
 
 set +e

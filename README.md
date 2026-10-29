@@ -4,9 +4,9 @@
 
 - **Hysteria2**（sing-box，UDP）——自签 ECDSA 证书 + `pinSHA256` 证书锁定 + salamander 混淆，也支持挂载真实证书
 - **VLESS-Reality**（Xray，TCP）——免域名、防探测
-- **Cloudflare Argo 隧道**（cloudflared + VMess-WS）——无公网 IP / NAT 环境也能用，临时隧道零配置
+- **Cloudflare Argo 隧道**（cloudflared + VLESS Encryption + XHTTP）——无公网 IP / NAT 环境也能用，临时隧道零配置
 
-已移除：Socks5、TUIC、AnyTLS、NaiveProxy、XHTTP、Shadowsocks、WARP 出站、SAP 多账户部署等全部非核心功能。
+已移除：Socks5、TUIC、AnyTLS、NaiveProxy、Shadowsocks、WARP 出站、SAP 多账户部署等全部非核心功能。
 
 三个内核 **只从官方 Release 下载**（XTLS/Xray-core、SagerNet/sing-box、cloudflare/cloudflared），构建时固定版本 + SHA256 校验，运行时不下载任何东西。
 
@@ -59,13 +59,18 @@ HY2_PORT=0  REALITY_PORT=0  ARGO=1
 
 并删掉 compose 里的 `ports` 段，容器只会主动向外连接。
 
-- **临时隧道**：不用账号，启动后 `links.txt` 里会出现 `*.trycloudflare.com` 的节点；每次重启域名都会变，适合临时使用。
-- **固定隧道**（推荐）：Cloudflare Zero Trust → Networks → Tunnels → 创建隧道，复制 token；在 Public hostname 里填你的域名，Service 选 `HTTP`，URL 填 `localhost:18080`；然后设置 `ARGO_TOKEN` 和 `ARGO_DOMAIN`。
+- **临时隧道（不可用）**：`*.trycloudflare.com` 临时域名经 Cloudflare Worker 中转，实测会挂起 XHTTP 的流式下行——请求能到达源站但数据回不到客户端（2026-10 实测，短响应可通、流式响应挂死）。启动日志会给出同样告警。如需 Argo 请使用固定隧道。
+- **固定隧道**（必选）：Cloudflare Zero Trust → Networks → Tunnels → 创建隧道，复制 token；在 Public hostname 里填你的域名，Service 选 `HTTP`，URL 填 `localhost:18080`；然后设置 `ARGO_TOKEN` 和 `ARGO_DOMAIN`。若域名解析到的 Cloudflare IP 在你的网络不可达（症状：时通时断、部分 IP 超时），用 `ARGO_ADDRESS` 指定一个可达的 Cloudflare 优选 IP。
 
 **国内 / UDP 受限网络必读**：cloudflared 默认 `ARGO_PROTOCOL=auto`（优先 QUIC/UDP）。若你的网络 UDP 到 Cloudflare 劣化（症状：隧道时通时断、真连接测试超时但偶发能通、容器日志反复出现 `failed to accept QUIC stream: timeout`），请设置 `ARGO_PROTOCOL=http2` 强制走 TCP 443，实测可解决。另外：把代理服务端跑在墙内网络时，`v2rayN 真连接测试`（默认目标 www.google.com）必然失败——出口在墙内，请用国内可达站点（如 baidu.com）测试。
 
-Argo 路径使用 VMess-WS（aes-128-gcm 端到端加密，Cloudflare 看不到内容），路径为随机值，只有拿到链接的人能访问。UDP 无法通过 Argo，所以 HY2 不能走隧道。
-Xray 已把 WebSocket 传输和 VMess 标记为弃用，升级 Xray 大版本前请先看发布说明。
+Argo 路径使用 **VLESS Encryption + XHTTP**：
+
+- VLESS Encryption 是端到端加密（X25519 认证、ML-KEM-768 后量子密钥交换、前向保密），Cloudflare 终止 TLS 后也只能看到密文。密钥对由 Xray 自己生成（`xray vlessenc`），保存在 `/data/secrets/argo_dec`（服务端私密）和 `argo_enc`（客户端公开串）。
+- XHTTP 使用 `packet-up` 模式，兼容固定隧道这类常规 CDN 回源；路径为随机值，只有拿到链接的人能访问（`*.trycloudflare.com` 临时隧道的 Worker 路径除外，见上文）。
+- UDP 无法通过 Argo，所以 HY2 不能走隧道。
+- **客户端要求**：需要支持 VLESS Encryption 和 XHTTP 的较新 Xray 内核客户端，请以所用客户端的发布说明为准。
+- **从旧版（VMess-WS）升级**：旧的 `vmess://` 链接会失效，重启容器后从 `links.txt` 取新的 `vless://` 链接重新导入；`/data/secrets` 里的 Argo UUID 和路径保持不变，只会新增 `argo_dec` / `argo_enc` 两个文件。
 
 ## 安全设计
 
@@ -73,7 +78,7 @@ Xray 已把 WebSocket 传输和 VMess 标记为弃用，升级 Xray 大版本前
 - HY2：本机生成的 ECDSA P-256 证书，链接带 `insecure=0` 与 `pinSHA256`（hex 指纹）；默认开启混淆；密码全部随机生成。
 - 出站屏蔽内网、回环、链路本地、CGNAT 地址（Xray `finalRules` + sing-box 路由双重拦截），防止被用来访问宿主机或云元数据。
 - 容器：非 root（uid 10001）、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`；密钥目录权限 700，文件 600。
-- 日志里没有密钥；Argo 令牌只通过环境变量传给 cloudflared，Xray 和 sing-box 拿不到。
+- 日志里没有密钥；Argo 令牌只通过环境变量传给 cloudflared，Xray 和 sing-box 拿不到。使用的协议和传输均未被 Xray 标记为弃用，启动日志无弃用告警。
 
 ## 升级内核版本
 
@@ -87,3 +92,5 @@ Xray 已把 WebSocket 传输和 VMess 标记为弃用，升级 Xray 大版本前
 
 - [yonggekkk/argosbx](https://github.com/yonggekkk/argosbx) —— 原项目
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core) / [SagerNet/sing-box](https://github.com/SagerNet/sing-box) / [cloudflare/cloudflared](https://github.com/cloudflare/cloudflared)
+
+

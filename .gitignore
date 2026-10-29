@@ -4,3 +4,4 @@ data/
 *.log
 测试/
 .env
+.e2e-*.sh

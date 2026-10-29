@@ -17,7 +17,7 @@ services:
       HY2_OBFS: "1"              # 1 = salamander obfuscation (recommended)
       REALITY_PORT: "443"        # 0 = disable
       REALITY_SNI: "addons.mozilla.org"
-      # --- Cloudflare Argo tunnel (VMess-WS behind cloudflared; needs no inbound port) ---
+      # --- Cloudflare Argo tunnel (VLESS Encryption + XHTTP behind cloudflared; needs no inbound port) ---
       ARGO: "0"                  # 1 = enable
       ARGO_TOKEN: ""             # empty = quick tunnel (random *.trycloudflare.com, changes on every restart)
       ARGO_DOMAIN: ""            # required with ARGO_TOKEN: the public hostname you set in the Cloudflare dashboard
