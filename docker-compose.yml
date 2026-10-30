@@ -26,6 +26,7 @@ services:
       # ARGO_LISTEN: "0.0.0.0"   # only when an HTTPS reverse proxy (PaaS public endpoint) fronts the XHTTP port
       # ARGO_PUBLIC_DOMAIN: ""   # domain of that reverse proxy -> emits an extra direct vless link (needs ARGO_LISTEN=0.0.0.0)
       # HY2_PASSWORD / HY2_OBFS_PASSWORD / REALITY_UUID / ARGO_UUID: optional, random values are generated if unset
+      # Stateless mode (no persistent /data): also REALITY_PRIVATE_KEY / REALITY_SID / ARGO_PATH / ARGO_DEC_KEY / ARGO_ENC_KEY
     volumes:
       - proxy-data:/data         # secrets, certificate, configs, links.txt (mode 600)
     # --- hardening ---

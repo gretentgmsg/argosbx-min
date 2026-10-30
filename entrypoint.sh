@@ -55,6 +55,18 @@ if [ "$HY2_PORT" = 0 ] && [ "$REALITY_PORT" = 0 ] && [ "$ARGO" = 0 ]; then die "
 for v in HY2_PASSWORD HY2_OBFS_PASSWORD REALITY_UUID ARGO_UUID; do
   [ -z "${!v:-}" ] || [[ "${!v}" =~ ^[A-Za-z0-9-]{16,64}$ ]] || die "$v: 16-64 chars of A-Za-z0-9-"
 done
+# Stateless-mode secrets (env instead of persisted files; see README "无状态部署").
+[ -z "${REALITY_PRIVATE_KEY:-}" ] || [[ "${REALITY_PRIVATE_KEY}" =~ ^[A-Za-z0-9_-]{40,48}$ ]] || die "invalid REALITY_PRIVATE_KEY (x25519 base64url from 'xray x25519')"
+[ -z "${REALITY_SID:-}" ] || [[ "${REALITY_SID}" =~ ^[0-9a-f]{2,16}$ ]] || die "invalid REALITY_SID (even-length hex, max 16)"
+[ -z "${ARGO_PATH:-}" ] || [[ "${ARGO_PATH}" =~ ^[0-9a-f]{4,32}$ ]] || die "invalid ARGO_PATH (hex, no leading slash)"
+VE_KEY_RE='^mlkem768x25519plus\.(native|xorpub|random)\.[0-9a-z]+\.[A-Za-z0-9_-]+$'
+[ -z "${ARGO_DEC_KEY:-}" ] || [[ "${ARGO_DEC_KEY}" =~ $VE_KEY_RE ]] || die "invalid ARGO_DEC_KEY (server value from 'xray vlessenc')"
+[ -z "${ARGO_ENC_KEY:-}" ] || [[ "${ARGO_ENC_KEY}" =~ $VE_KEY_RE ]] || die "invalid ARGO_ENC_KEY (client value from 'xray vlessenc')"
+if [ -n "${ARGO_DEC_KEY:-}" ] || [ -n "${ARGO_ENC_KEY:-}" ]; then
+  { [ -n "${ARGO_DEC_KEY:-}" ] && [ -n "${ARGO_ENC_KEY:-}" ]; } || die "ARGO_DEC_KEY and ARGO_ENC_KEY must be set together"
+  [[ "$ARGO_DEC_KEY" == *".600s."* ]] || die "ARGO_DEC_KEY must be the decryption (.600s.) value"
+  [[ "$ARGO_ENC_KEY" == *".0rtt."* ]] || die "ARGO_ENC_KEY must be the encryption (.0rtt.) value"
+fi
 
 # ---------- data dir: prefer $DATA_DIR; fall back if the platform mounts it non-writable ----------
 # PaaS volumes (Northflank etc.) are often owned by another uid, which makes chmod/mkdir fail for
@@ -176,14 +188,19 @@ fi
 # ======================= Xray: VLESS-Reality and/or VLESS-Encryption+XHTTP (Argo origin) =======================
 XRAY_INBOUNDS=""
 if [ "$REALITY_PORT" != 0 ]; then
-  PRIV_FILE="$DATA_DIR/secrets/reality_private"
-  if [ ! -s "$PRIV_FILE" ]; then
-    "$BIN_DIR/xray" x25519 | awk -F': *' 'tolower($0) ~ /^private/ {printf "%s",$2}' > "$PRIV_FILE"
+  if [ -n "${REALITY_PRIVATE_KEY:-}" ]; then
+    R_PRIV="$REALITY_PRIVATE_KEY"
+  else
+    PRIV_FILE="$DATA_DIR/secrets/reality_private"
+    if [ ! -s "$PRIV_FILE" ]; then
+      "$BIN_DIR/xray" x25519 | awk -F': *' 'tolower($0) ~ /^private/ {printf "%s",$2}' > "$PRIV_FILE"
+    fi
+    R_PRIV="$(tr -d '\n' < "$PRIV_FILE")"
   fi
-  R_PRIV="$(tr -d '\n' < "$PRIV_FILE")"
+  unset REALITY_PRIVATE_KEY
   R_PUB="$("$BIN_DIR/xray" x25519 -i "$R_PRIV" | awk -F': *' 'tolower($1) ~ /^(password|public)/ {printf "%s",$2; exit}')"
   [ -n "$R_PRIV" ] && [ -n "$R_PUB" ] || die "failed to derive Reality keys"
-  SID="$(secret reality_sid 8)"
+  SID="$(secret reality_sid 8 "${REALITY_SID:-}")"; unset REALITY_SID
   XRAY_INBOUNDS="$(cat <<JSON
     {
       "tag": "reality-in",
@@ -210,17 +227,22 @@ JSON
 fi
 
 if [ "$ARGO" = 1 ]; then
-  XH_PATH="/$(secret argo_path 8)"          # random path: only clients that know it reach the proxy
-  # VLESS Encryption key pair (X25519 authentication + ML-KEM-768 post-quantum key exchange), generated once by Xray itself.
-  # "decryption" is the server secret, "encryption" is the public client string.
-  if [ ! -s "$DATA_DIR/secrets/argo_dec" ] || [ ! -s "$DATA_DIR/secrets/argo_enc" ]; then
-    VE="$("$BIN_DIR/xray" vlessenc)"
-    printf '%s\n' "$VE" | awk -F'"' '/^Authentication:/ {on = ($0 ~ /X25519/)} on && /"decryption"/ {printf "%s", $4; exit}' > "$DATA_DIR/secrets/argo_dec"
-    printf '%s\n' "$VE" | awk -F'"' '/^Authentication:/ {on = ($0 ~ /X25519/)} on && /"encryption"/ {printf "%s", $4; exit}' > "$DATA_DIR/secrets/argo_enc"
+  XH_PATH="/$(secret argo_path 8 "${ARGO_PATH:-}")"; unset ARGO_PATH   # random path: only clients that know it reach the proxy
+  # VLESS Encryption key pair (X25519 authentication + ML-KEM-768 post-quantum key exchange).
+  # "decryption" is the server secret, "encryption" is the public client string. Env pair (stateless mode) wins.
+  if [ -n "${ARGO_DEC_KEY:-}" ] && [ -n "${ARGO_ENC_KEY:-}" ]; then
+    ARGO_DEC="$ARGO_DEC_KEY"; ARGO_ENC="$ARGO_ENC_KEY"
+  else
+    if [ ! -s "$DATA_DIR/secrets/argo_dec" ] || [ ! -s "$DATA_DIR/secrets/argo_enc" ]; then
+      VE="$("$BIN_DIR/xray" vlessenc)"
+      printf '%s\n' "$VE" | awk -F'"' '/^Authentication:/ {on = ($0 ~ /X25519/)} on && /"decryption"/ {printf "%s", $4; exit}' > "$DATA_DIR/secrets/argo_dec"
+      printf '%s\n' "$VE" | awk -F'"' '/^Authentication:/ {on = ($0 ~ /X25519/)} on && /"encryption"/ {printf "%s", $4; exit}' > "$DATA_DIR/secrets/argo_enc"
+    fi
+    ARGO_DEC="$(tr -d '\n' < "$DATA_DIR/secrets/argo_dec")"; ARGO_ENC="$(tr -d '\n' < "$DATA_DIR/secrets/argo_enc")"
+    RE='^mlkem768x25519plus\.(native|xorpub|random)\.[0-9a-z]+\.[A-Za-z0-9_-]+$'
+    [[ "$ARGO_DEC" =~ $RE && "$ARGO_ENC" =~ $RE ]] || die "could not read VLESS Encryption keys from 'xray vlessenc' (delete $DATA_DIR/secrets/argo_dec and argo_enc to regenerate)"
   fi
-  ARGO_DEC="$(tr -d '\n' < "$DATA_DIR/secrets/argo_dec")"; ARGO_ENC="$(tr -d '\n' < "$DATA_DIR/secrets/argo_enc")"
-  RE='^mlkem768x25519plus\.(native|xorpub|random)\.[0-9a-z]+\.[A-Za-z0-9_-]+$'
-  [[ "$ARGO_DEC" =~ $RE && "$ARGO_ENC" =~ $RE ]] || die "could not read VLESS Encryption keys from 'xray vlessenc' (delete $DATA_DIR/secrets/argo_dec and argo_enc to regenerate)"
+  unset ARGO_DEC_KEY ARGO_ENC_KEY
   ARGO_IN="$(cat <<JSON
     {
       "tag": "argo-in",

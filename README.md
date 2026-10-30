@@ -37,6 +37,7 @@ docker exec proxy cat /data/links.txt   # 分享链接（含密钥，不会写�
 | `SERVER_HOST` | 自动 | 公网 IP 或域名；留空会通过 HTTPS 请求 api.ipify.org |
 | `NODE_NAME` | `node` | 节点备注名 |
 | `HY2_PASSWORD` `HY2_OBFS_PASSWORD` `REALITY_UUID` `ARGO_UUID` | 随机 | 可选覆盖，首次启动自动生成并保存在 `/data/secrets` |
+| `REALITY_PRIVATE_KEY` `REALITY_SID` `ARGO_PATH` `ARGO_DEC_KEY` `ARGO_ENC_KEY` | 随机/自动 | 无状态模式的密钥注入，见下文「无状态部署」 |
 
 ## 使用真实域名证书（可选）
 
@@ -87,7 +88,22 @@ ARGO_PUBLIC_DOMAIN=你的平台公网域名   # 例如 xxx.northflank.app
 - **路径 A（Argo 固定隧道）**：照常配置 `ARGO_TOKEN` / `ARGO_DOMAIN`，纯出站。
 - **路径 B（平台 HTTPS 端点直连）**：给容器的 `18080` 建 **HTTP 类型**的 private 端口（不要选 HTTP/2——那会要求源站说 h2c），再把 public HTTPS 端点绑上去；`links.txt` 里 `#node-direct` 结尾的链接即走此路径（平台 TLS + VLESS 端到端加密，与走 Cloudflare 同级安全模型）。
 - 注意：反代若缓冲流式响应会挂死 XHTTP 下行（trycloudflare 的 Worker 即如此），平台入口行为需实测；不通就只用路径 A。
-- **平台卷权限**：若挂载的卷不属于运行用户（uid 10001），容器不再崩溃——自动回退到临时目录并打印告警（密钥不持久，每次重启需重新取链接）。长期使用请修卷属主，或不挂卷接受此模式。
+- **平台卷权限**：若挂载的卷不属于运行用户（uid 10001），容器不再崩溃——自动回退到临时目录并打印告警（密钥不持久，每次重启需重新取链接）。
+- **无状态部署（推荐搭配上一种情况）**：把全部密钥改由环境变量注入，重启后链接完全不变，不再依赖持久卷。以 Argo-only 为例，生成一次密钥后填入：
+
+```bash
+# 1) 生成 vlessenc 密钥对（取 X25519 组两条值）：
+docker run --rm --entrypoint /opt/bin/xray ghcr.io/gretentgmsg/argosbx-min:latest vlessenc
+# 2) 随机 UUID / 路径：uuidgen；openssl rand -hex 8
+# 3) Northflank 环境变量：
+#    ARGO_UUID=<uuid>
+#    ARGO_PATH=<16位hex，不带斜杠>
+#    ARGO_DEC_KEY=<vlessenc 的 decryption (.600s.) 值>
+#    ARGO_ENC_KEY=<vlessenc 的 encryption (.0rtt.) 值>
+```
+
+  开启 Reality 时同理注入 `REALITY_UUID` / `REALITY_PRIVATE_KEY`（`xray x25519` 的 Private key）/ `REALITY_SID`。HY2 的自签证书含 pinSHA256，无持久卷时 pin 每次重启会变，建议 HY2 只在能持久化 `/data` 的环境使用，或挂载真实证书文件。
+  密钥出现在平台环境变量里，注意控制面板访问权限。
 
 ## 安全设计
 
