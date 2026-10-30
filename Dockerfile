@@ -51,6 +51,8 @@ RUN apt-get update \
 COPY --from=fetch /out/ /opt/bin/
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 ENV XRAY_LOCATION_ASSET=/opt/bin
+# Some PaaS wrappers run tini as a non-PID-1 process; registering as subreaper keeps zombie reaping working there.
+ENV TINI_SUBREAPER=1
 USER 10001:10001
 VOLUME ["/data"]
 EXPOSE 443/tcp 443/udp

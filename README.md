@@ -87,6 +87,7 @@ ARGO_PUBLIC_DOMAIN=你的平台公网域名   # 例如 xxx.northflank.app
 - **路径 A（Argo 固定隧道）**：照常配置 `ARGO_TOKEN` / `ARGO_DOMAIN`，纯出站。
 - **路径 B（平台 HTTPS 端点直连）**：给容器的 `18080` 建 **HTTP 类型**的 private 端口（不要选 HTTP/2——那会要求源站说 h2c），再把 public HTTPS 端点绑上去；`links.txt` 里 `#node-direct` 结尾的链接即走此路径（平台 TLS + VLESS 端到端加密，与走 Cloudflare 同级安全模型）。
 - 注意：反代若缓冲流式响应会挂死 XHTTP 下行（trycloudflare 的 Worker 即如此），平台入口行为需实测；不通就只用路径 A。
+- **平台卷权限**：若挂载的卷不属于运行用户（uid 10001），容器不再崩溃——自动回退到临时目录并打印告警（密钥不持久，每次重启需重新取链接）。长期使用请修卷属主，或不挂卷接受此模式。
 
 ## 安全设计
 

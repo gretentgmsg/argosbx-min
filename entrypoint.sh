@@ -56,7 +56,20 @@ for v in HY2_PASSWORD HY2_OBFS_PASSWORD REALITY_UUID ARGO_UUID; do
   [ -z "${!v:-}" ] || [[ "${!v}" =~ ^[A-Za-z0-9-]{16,64}$ ]] || die "$v: 16-64 chars of A-Za-z0-9-"
 done
 
-mkdir -p "$DATA_DIR/secrets"; chmod 700 "$DATA_DIR" "$DATA_DIR/secrets"
+# ---------- data dir: prefer $DATA_DIR; fall back if the platform mounts it non-writable ----------
+# PaaS volumes (Northflank etc.) are often owned by another uid, which makes chmod/mkdir fail for
+# this non-root process; keep the container up by moving to an ephemeral writable dir instead of dying.
+ORIG_DATA_DIR="$DATA_DIR"
+mkdir -p "$DATA_DIR/secrets" 2>/dev/null || true
+chmod 700 "$DATA_DIR" "$DATA_DIR/secrets" 2>/dev/null || true
+if ! ( : > "$DATA_DIR/secrets/.writable" ) 2>/dev/null; then
+  DATA_DIR="${TMPDIR:-/tmp}/argosbx-data"
+  echo "[warn] $ORIG_DATA_DIR is not writable by uid $(id -u) (PaaS volume permissions?); falling back to $DATA_DIR" >&2
+  echo "[warn] secrets and links will NOT survive restarts in fallback mode - fix the volume ownership or remount" >&2
+  mkdir -p "$DATA_DIR/secrets"; chmod 700 "$DATA_DIR" "$DATA_DIR/secrets"
+  : > "$DATA_DIR/secrets/.writable"
+fi
+rm -f "$DATA_DIR/secrets/.writable"
 
 # ---------- secrets: env override > persisted file > freshly generated ----------
 secret() { # name bytes [override]
