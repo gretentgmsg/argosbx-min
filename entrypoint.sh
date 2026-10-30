@@ -15,7 +15,9 @@ REALITY_PORT="${REALITY_PORT:-443}"      # TCP; 0 = disable Reality
 REALITY_SNI="${REALITY_SNI:-addons.mozilla.org}"
 ARGO="${ARGO:-0}"                        # 1 = enable Cloudflare Argo tunnel (works without a reachable public IP)
 ARGO_PORT="${ARGO_PORT:-18080}"          # local-only (127.0.0.1) VLESS-XHTTP port that cloudflared forwards to
+ARGO_LISTEN="${ARGO_LISTEN:-127.0.0.1}"  # bind address of that port; set 0.0.0.0 when a reverse proxy (e.g. a PaaS HTTPS endpoint) reaches it via the pod IP
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"           # fixed tunnel: the public hostname configured in the Cloudflare dashboard
+ARGO_PUBLIC_DOMAIN="${ARGO_PUBLIC_DOMAIN:-}"  # optional: domain of an HTTPS reverse proxy in front of the XHTTP port -> emits an extra direct vless link
 ARGO_ADDRESS="${ARGO_ADDRESS:-}"         # optional: preferred Cloudflare IP/domain for the client to connect to
 ARGO_PROTOCOL="${ARGO_PROTOCOL:-auto}"   # auto | http2 | quic
 NODE_NAME="${NODE_NAME:-node}"
@@ -42,6 +44,8 @@ is_host "$REALITY_SNI"  || die "invalid REALITY_SNI"
 [[ "$ARGO_PROTOCOL" =~ ^(auto|http2|quic)$ ]] || die "ARGO_PROTOCOL must be auto, http2 or quic"
 [ -z "$ARGO_DOMAIN" ]  || is_host "$ARGO_DOMAIN"  || die "invalid ARGO_DOMAIN"
 [ -z "$ARGO_ADDRESS" ] || is_host "$ARGO_ADDRESS" || die "invalid ARGO_ADDRESS"
+[[ "$ARGO_LISTEN" =~ ^(127\.0\.0\.1|0\.0\.0\.0)$ ]] || die "ARGO_LISTEN must be 127.0.0.1 or 0.0.0.0"
+[ -z "$ARGO_PUBLIC_DOMAIN" ] || is_host "$ARGO_PUBLIC_DOMAIN" || die "invalid ARGO_PUBLIC_DOMAIN"
 [ -z "$CF_TOKEN" ] || [[ "$CF_TOKEN" =~ ^[A-Za-z0-9=_+/-]{50,2000}$ ]] || die "ARGO_TOKEN has an unexpected format"
 [ -z "$CF_TOKEN" ] || [ -n "$ARGO_DOMAIN" ] || die "ARGO_DOMAIN is required together with ARGO_TOKEN (fixed tunnel)"
 [ -z "$CF_TOKEN" ] || [ "$ARGO" = 1 ] || die "ARGO_TOKEN is set but ARGO=0"
@@ -207,7 +211,7 @@ if [ "$ARGO" = 1 ]; then
   ARGO_IN="$(cat <<JSON
     {
       "tag": "argo-in",
-      "listen": "127.0.0.1",
+      "listen": "$ARGO_LISTEN",
       "port": $ARGO_PORT,
       "protocol": "vless",
       "settings": { "clients": [ { "id": "$ARGO_ID" } ], "decryption": "$ARGO_DEC" },
@@ -253,6 +257,12 @@ argo_link() { # tunnel-domain
   echo "vless://$ARGO_ID@$addr:443?encryption=$ARGO_ENC&security=tls&sni=$d&fp=chrome&alpn=h2&type=xhttp&host=$d&path=%2F${XH_PATH#/}&mode=packet-up#$NODE_NAME-argo" >> "$LINKS"
 }
 [ "$ARGO" = 1 ] && [ -n "$CF_TOKEN" ] && argo_link "$ARGO_DOMAIN"
+
+# Direct link for an HTTPS reverse proxy (e.g. a PaaS public HTTPS endpoint) in front of the XHTTP port
+# (requires ARGO_LISTEN=0.0.0.0). The proxy terminates TLS; VLESS Encryption still protects the payload end to end.
+if [ "$ARGO" = 1 ] && [ -n "$ARGO_PUBLIC_DOMAIN" ]; then
+  echo "vless://$ARGO_ID@$ARGO_PUBLIC_DOMAIN:443?encryption=$ARGO_ENC&security=tls&sni=$ARGO_PUBLIC_DOMAIN&fp=chrome&alpn=h2&type=xhttp&host=$ARGO_PUBLIC_DOMAIN&path=%2F${XH_PATH#/}&mode=packet-up#$NODE_NAME-direct" >> "$LINKS"
+fi
 
 echo "[ok] configs generated. Share links (contain secrets, NOT printed to logs):"
 echo "     docker exec <container> cat $LINKS"

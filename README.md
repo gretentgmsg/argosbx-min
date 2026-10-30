@@ -31,6 +31,8 @@ docker exec proxy cat /data/links.txt   # 分享链接（含密钥，不会写�
 | `ARGO` | `0` | `1` 启用 Argo 隧道 |
 | `ARGO_TOKEN` / `ARGO_DOMAIN` | 空 | 固定隧道：令牌 + 你在 Cloudflare 控制台配置的域名；两者都空则用临时隧道 |
 | `ARGO_PORT` | `18080` | 仅监听 127.0.0.1，cloudflared 转发到这里 |
+| `ARGO_LISTEN` | `127.0.0.1` | 设 `0.0.0.0` 当有 HTTPS 反代（如 PaaS 公开端点）直连该端口时 |
+| `ARGO_PUBLIC_DOMAIN` | 空 | 该反代的域名；设置后 links.txt 会额外生成一条不经 Cloudflare 的直连 vless 链接（需 `ARGO_LISTEN=0.0.0.0`） |
 | `ARGO_ADDRESS` | 空 | 可选：客户端连接用的优选 Cloudflare IP/域名 |
 | `SERVER_HOST` | 自动 | 公网 IP 或域名；留空会通过 HTTPS 请求 api.ipify.org |
 | `NODE_NAME` | `node` | 节点备注名 |
@@ -71,6 +73,20 @@ Argo 路径使用 **VLESS Encryption + XHTTP**：
 - UDP 无法通过 Argo，所以 HY2 不能走隧道。
 - **客户端要求**：需要支持 VLESS Encryption 和 XHTTP 的较新 Xray 内核客户端，请以所用客户端的发布说明为准。
 - **从旧版（VMess-WS）升级**：旧的 `vmess://` 链接会失效，重启容器后从 `links.txt` 取新的 `vless://` 链接重新导入；`/data/secrets` 里的 Argo UUID 和路径保持不变，只会新增 `argo_dec` / `argo_enc` 两个文件。
+
+## 部署在容器 PaaS（Northflank 等，只有 public HTTP/HTTPS 端口）
+
+此类平台无法暴露原始 TCP/UDP，直连协议全部关闭，用两条 HTTP 路径：
+
+```
+HY2_PORT=0  REALITY_PORT=0  ARGO=1
+ARGO_LISTEN=0.0.0.0
+ARGO_PUBLIC_DOMAIN=你的平台公网域名   # 例如 xxx.northflank.app
+```
+
+- **路径 A（Argo 固定隧道）**：照常配置 `ARGO_TOKEN` / `ARGO_DOMAIN`，纯出站。
+- **路径 B（平台 HTTPS 端点直连）**：给容器的 `18080` 建 **HTTP 类型**的 private 端口（不要选 HTTP/2——那会要求源站说 h2c），再把 public HTTPS 端点绑上去；`links.txt` 里 `#node-direct` 结尾的链接即走此路径（平台 TLS + VLESS 端到端加密，与走 Cloudflare 同级安全模型）。
+- 注意：反代若缓冲流式响应会挂死 XHTTP 下行（trycloudflare 的 Worker 即如此），平台入口行为需实测；不通就只用路径 A。
 
 ## 安全设计
 
