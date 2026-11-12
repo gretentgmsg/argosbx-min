@@ -18,7 +18,7 @@ services:
       REALITY_PORT: "443"        # 0 = disable
       REALITY_SNI: "addons.mozilla.org"
       # --- Cloudflare Argo tunnel (VLESS Encryption + XHTTP behind cloudflared; needs no inbound port) ---
-      ARGO: "0"                  # 1 = enable
+      ARGO: "0"                  # 1 = enable; with ARGO_PUBLIC_DOMAIN but NO token, cloudflared is skipped (reverse-proxy-only)
       ARGO_TOKEN: ""             # empty = quick tunnel (random *.trycloudflare.com, changes on every restart)
       ARGO_DOMAIN: ""            # required with ARGO_TOKEN: the public hostname you set in the Cloudflare dashboard
       # ARGO_PROTOCOL: "http2"   # 国内/UDP受限网络建议开启：QUIC 到 Cloudflare 劣化会导致隧道时通时断

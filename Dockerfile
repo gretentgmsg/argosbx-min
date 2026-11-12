@@ -37,7 +37,7 @@ RUN set -eux; \
     echo "${CF_SHA}  cloudflared" | sha256sum -c -; \
     mkdir -p /out; \
     tar -xzf sb.tgz --strip-components=1 -C /out --wildcards '*/sing-box'; \
-    unzip -q -o xr.zip xray geoip.dat geosite.dat -d /out; \
+    unzip -q -o xr.zip xray -d /out; \
     install -m 0755 cloudflared /out/cloudflared; \
     chmod 0755 /out/sing-box /out/xray; \
     /out/sing-box version | head -n1; /out/xray version | head -n1; /out/cloudflared --version

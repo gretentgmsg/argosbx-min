@@ -132,6 +132,21 @@ REALITY_PORT: "0"    # 无公网 TCP 入站的平台关闭
 - 容器：非 root（uid 10001）、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`；密钥目录权限 700，文件 600。
 - 日志里没有密钥；Argo 令牌只通过环境变量传给 cloudflared，Xray 和 sing-box 拿不到。使用的协议和传输均未被 Xray 标记为弃用，启动日志无弃用告警。
 
+## 内存占用与按需裁剪
+
+各进程实测稳态 RSS（约值）：sing-box 57MB、cloudflared 42MB、xray 31MB、perl NAT 中继 7MB、supervisor 2MB。入口脚本在完成配置后 `exec` 移交给全新精简 supervisor（启动阶段的 shell 堆膨胀 ~40MB 被整体释放）；geoip/geosite 数据文件已从镜像移除（私网拦截改为显式 CIDR，xray 不再加载 geodata）。
+
+按需关闭不用的业务（入口脚本只启动启用的进程）：
+
+| 部署形态 | 配置 | 预期稳态 |
+|---|---|---|
+| 只要 HY2 直连（打洞） | `HY2_PORT=4433 HY2_NAT=1 REALITY_PORT=0 ARGO=0` | ~65MB（sing-box+perl+supervisor） |
+| 只要反代直连 XHTTP | `ARGO=1 ARGO_PUBLIC_DOMAIN=xxx`（**不设** `ARGO_TOKEN`，自动跳过 cloudflared） | ~33MB（xray+supervisor） |
+| HY2 打洞 + 反代直连 | 上面两者相加 | ~100MB |
+| 全量（含 Argo 隧道） | 再加 `ARGO_TOKEN/ARGO_DOMAIN` | ~140MB+ |
+
+进一步压缩：给容器加 `GOMEMLIMIT=48MiB`（或按需 32/64），xray/sing-box/cloudflared 三个 Go 进程会各自遵守软上限、更积极归还内存；代价是高负载时多花一点 CPU 做 GC。
+
 ## 升级内核版本
 
 同时修改 `Dockerfile` 里的版本号与对应 SHA256 后重新构建：

@@ -435,7 +435,7 @@ $XRAY_INBOUNDS
       "protocol": "freedom",
       "settings": {
         "finalRules": [
-          { "action": "block", "ip": [ "geoip:private", "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15" ] }
+          { "action": "block", "ip": [ "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/3", "::1/128", "fc00::/7", "fe80::/10" ] }
         ]
       },
       "streamSettings": { "sockopt": { "domainStrategy": "UseIP" } }
@@ -467,6 +467,12 @@ echo "     docker exec <container> cat $LINKS"
 [ "${GENERATE_ONLY:-0}" = 1 ] && exit 0
 
 # ======================= run =======================
+# Direct-only mode: XHTTP port served solely behind an HTTPS reverse proxy -> no tunnel needed.
+RUN_CLOUDFLARED=1
+if [ "$ARGO" = 1 ] && [ -z "$CF_TOKEN" ] && [ -n "$ARGO_PUBLIC_DOMAIN" ]; then
+  RUN_CLOUDFLARED=0
+  echo "[info] ARGO_PUBLIC_DOMAIN set without ARGO_TOKEN: skipping cloudflared, serving the reverse proxy only"
+fi
 if [ "$HY2_PORT" != 0 ]; then "$BIN_DIR/sing-box" run -c "$DATA_DIR/sing-box.json" & PIDS+=($!); fi
 if [ "$HY2_PORT" != 0 ] && [ "$HY2_NAT" = 1 ]; then
   NAT_PORT="$HY2_PORT" NAT_UP_PORT="$HY2_NAT_INTERNAL" NAT_STUN="$STUN_SERVERS" \
@@ -475,7 +481,7 @@ if [ "$HY2_PORT" != 0 ] && [ "$HY2_NAT" = 1 ]; then
     perl "$DATA_DIR/hy2-nat.pl" & PIDS+=($!)
 fi
 if [ -n "$XRAY_INBOUNDS" ]; then "$BIN_DIR/xray" run -c "$DATA_DIR/xray.json" & PIDS+=($!); fi
-if [ "$ARGO" = 1 ]; then
+if [ "$ARGO" = 1 ] && [ "$RUN_CLOUDFLARED" = 1 ]; then
   CF_ARGS=(tunnel --no-autoupdate --protocol "$ARGO_PROTOCOL" --metrics "$METRICS_ADDR" --loglevel warn)
   if [ -n "$CF_TOKEN" ]; then
     TUNNEL_TOKEN="$CF_TOKEN" "$BIN_DIR/cloudflared" "${CF_ARGS[@]}" run & CF_PID=$!      # token via env, not argv
@@ -486,11 +492,8 @@ if [ "$ARGO" = 1 ]; then
   unset CF_TOKEN
 fi
 
-STOPPING=0
-trap 'STOPPING=1; kill "${PIDS[@]}" 2>/dev/null' TERM INT
-
 # Quick tunnel: ask cloudflared for the hostname it was assigned, then publish the link.
-if [ "$ARGO" = 1 ] && [ "$FIXED_TUNNEL" = 0 ]; then
+if [ "$ARGO" = 1 ] && [ "$RUN_CLOUDFLARED" = 1 ] && [ "$FIXED_TUNNEL" = 0 ]; then
   QDOM=""
   for _ in $(seq 1 45); do
     kill -0 "$CF_PID" 2>/dev/null || break
@@ -503,10 +506,25 @@ if [ "$ARGO" = 1 ] && [ "$FIXED_TUNNEL" = 0 ]; then
   echo "[warn] quick tunnels (*.trycloudflare.com) are served through a Cloudflare Worker that breaks XHTTP's streaming download: requests reach this server but no data returns to the client. Use a fixed tunnel (ARGO_TOKEN + ARGO_DOMAIN)." >&2
 fi
 
-set +e
-wait -n "${PIDS[@]}"; rc=$?
-kill "${PIDS[@]}" 2>/dev/null; wait 2>/dev/null
-[ "$STOPPING" = 1 ] && exit 0                      # docker stop: clean exit
-[ "$rc" -ne 0 ] || rc=1                            # a proxy should never exit by itself -> non-zero so Docker restarts us
-echo "[error] a proxy process exited unexpectedly (rc=$rc)" >&2
-exit "$rc"
+# Hand over to a fresh, minimal supervisor. exec replaces this setup shell, whose heap has
+# ballooned (~40 MB observed) during config generation; the new image starts below 2 MB.
+# The supervisor is perl, not bash: a post-exec shell has no job-table records for the
+# children, so bash's `wait` would fail with "no such job"; perl's wait() is a raw syscall.
+exec perl - "${PIDS[@]}" <<'SUPERVISOR'
+my @pids = @ARGV;
+my $stopping = 0;
+$SIG{TERM} = $SIG{INT} = sub { $stopping = 1; kill 'TERM', @pids };
+$SIG{ALRM} = sub { kill 'KILL', @pids };
+my $rc = 0;
+while (1) {
+  my $p = wait();
+  last if $p < 0;                       # all children gone
+  $rc = ($? >> 8) unless $stopping;
+  kill 'TERM', @pids; alarm 5;          # first death takes the rest down
+}
+1 while wait() >= 0;                     # reap stragglers
+if ($stopping) { exit 0 }               # docker stop: clean exit
+$rc = 1 unless $rc;                     # a proxy should never exit by itself -> non-zero so Docker restarts us
+print STDERR "[error] a proxy process exited unexpectedly (rc=$rc)\n";
+exit $rc;
+SUPERVISOR
