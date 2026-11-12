@@ -37,6 +37,10 @@ docker exec proxy cat /data/links.txt   # 分享链接（含密钥，不会写�
 | `STUN_SERVERS` | Google/Cloudflare STUN | UDP 打洞模式的 STUN 服务器列表（逗号分隔 host[:port]） |
 | `HY2_NAT` | `0` | `1` = UDP 打洞模式：perl 中继独占 `HY2_PORT`，20 秒 STUN 保活并把公网映射上报信令服务器，客户端经 NAT 映射直连（无需公网入站端口） |
 | `SIGNAL_URL` / `SIGNAL_TOKEN` | 空 | 信令服务器上报地址与 Bearer 令牌（`HY2_NAT=1` 时使用；POST `{"ip","port","uri","time"}`，客户端从其 `/target` 拉最新节点） |
+| `TAILSCALE` | `0` | `1` = Tailscale 用户态模式：自动打洞 + DERP 兜底，HY2 经容器稳定的 100.x 内网地址直连（见下文） |
+| `TS_AUTHKEY` | 空 | Tailscale Auth Key（首次启动必填；建议勾选 Reusable，节点身份随后持久化在 `/data/tailscale`，重启免 key） |
+| `TS_LOGIN_SERVER` | 空 | 可选：自建 Headscale 协调服务器地址 |
+| `TS_HOSTNAME` | `NODE_NAME` | 节点在 tailnet 中的名称（仅 `A-Za-z0-9-`） |
 | `SERVER_HOST` | 自动 | 公网 IP 或域名；留空会通过 HTTPS 请求 api.ipify.org |
 | `NODE_NAME` | `node` | 节点备注名 |
 | `HY2_PASSWORD` `HY2_OBFS_PASSWORD` `REALITY_UUID` `ARGO_UUID` | 随机 | 可选覆盖，首次启动自动生成并保存在 `/data/secrets` |
@@ -123,6 +127,21 @@ REALITY_PORT: "0"    # 无公网 TCP 入站的平台关闭
 原理：perl 中继**独占** `HY2_PORT`（无需 SO_REUSEPORT——sing-box 与官方 hysteria 内核实测都不支持端口共享），sing-box 的 HY2 服务端退到 `127.0.0.1:18081` 由中继按客户端分流转发；中继每 20 秒从同一套接字向 STUN 发包保活 Cloud NAT 映射，映射变化时自动把 `ip/port/完整 hysteria2 链接` POST 到信令服务器并更新 links.txt。客户端从信令服务器的 `/target` 拉最新链接导入（v2rayN 等不支持自动拉取，需手动更新或用脚本）。
 
 注意：信令服务器需自备（POST `/report` 收 `{"ip","port","uri","time"}`，GET `/target` 返回最新值，Bearer 鉴权）；20 秒保活间隔按 GCP Cloud NAT 默认 30 秒 UDP 超时设计，超时更短的 NAT 需相应调小。
+
+## HY2 经 Tailscale 用户态直连（受限 NAT 的兜底方案）
+
+适用于打洞型 NAT（Port Restricted / Symmetric）打不通、或不想依赖信令服务的环境。tailscaled 以 `--tun=userspace-networking` 纯用户态运行（gVisor 网络栈），无 root、无 NET_ADMIN 即可：自动 STUN 探测 + DERP 协调 + 端口预测双向打洞，失败时经 DERP 中转兜底。发到容器 100.x 地址 `HY2_PORT` 的 UDP 会被投递到本地 sing-box。
+
+```yaml
+HY2_PORT: "4433"
+TAILSCALE: "1"
+TS_AUTHKEY: "tskey-auth-..."     # Tailscale 控制台生成，建议 Reusable
+# TS_LOGIN_SERVER: "https://你的headscale"   # 可选自建
+# TS_HOSTNAME: "gcp-hy2-node"
+REALITY_PORT: "0"  ARGO: "0"  HY2_NAT: "0"   # TAILSCALE 与 HY2_NAT 互斥
+```
+
+**客户端必须加入同一 tailnet**（官方 Tailscale 客户端或 Headscale）——这是与 HY2_NAT 模式最大的使用差异。链接在容器拿到 100.x 地址后写入 links.txt（`#...-ts-hy2`），**地址重启不变**；配置了 `SIGNAL_URL` 时也会上报一份。`tailscale status` 中该节点显示 `direct` 即 P2P 直连成功、`relay` 为 DERP 中转。内存代价：tailscaled 约 +40MB。
 
 ## 安全设计
 

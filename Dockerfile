@@ -12,35 +12,41 @@ ARG TARGETARCH
 ARG SINGBOX_VERSION=1.14.4
 ARG XRAY_VERSION=26.10.21
 ARG CF_VERSION=2026.10.5
-# SHA256 of the release assets (verified against upstream on 2026-10-28).
+ARG TS_VERSION=1.104.6
+# SHA256 of the release assets (verified against upstream on 2026-10-28 / Tailscale on 2026-11-12).
 ARG SB_SHA256_AMD64=231e57c18378f780a08de832844a1ca9716e17a7bcf82964b350844d243c03ac
 ARG SB_SHA256_ARM64=241cb4ccbf1a003235f8a969cc25d28cc74487df52721f6de28be7e37eae2ae9
 ARG XR_SHA256_AMD64=0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978
 ARG XR_SHA256_ARM64=d1304946c486d98e6b886e9b931eaaaebb23835b30e217638037b7f2721d4e9c
 ARG CF_SHA256_AMD64=e1bc0cf084fd9e590554fe769a86b1db46701c3f847a43d902f7b974a4e16298
 ARG CF_SHA256_ARM64=72e0d05a67e09da87cf495e409a28c3cc5994dd23fc66a982eebea6a55923b7d
+ARG TS_SHA256_AMD64=82a85429f733e52fd1a95dedb2c8dd8cd46d6603504e566a56b1779c9a7a4809
+ARG TS_SHA256_ARM64=d0e4f297da3c428d02162c6235b9948e4ddc245c64502b7b05647da9b96a0971
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /tmp/dl
 RUN set -eux; \
     case "${TARGETARCH}" in \
-      amd64) SB_ARCH=amd64; XR_ARCH=64;        CF_ARCH=amd64; SB_SHA="${SB_SHA256_AMD64}"; XR_SHA="${XR_SHA256_AMD64}"; CF_SHA="${CF_SHA256_AMD64}" ;; \
-      arm64) SB_ARCH=arm64; XR_ARCH=arm64-v8a; CF_ARCH=arm64; SB_SHA="${SB_SHA256_ARM64}"; XR_SHA="${XR_SHA256_ARM64}"; CF_SHA="${CF_SHA256_ARM64}" ;; \
+      amd64) SB_ARCH=amd64; XR_ARCH=64;        CF_ARCH=amd64; TS_ARCH=amd64; SB_SHA="${SB_SHA256_AMD64}"; XR_SHA="${XR_SHA256_AMD64}"; CF_SHA="${CF_SHA256_AMD64}"; TS_SHA="${TS_SHA256_AMD64}" ;; \
+      arm64) SB_ARCH=arm64; XR_ARCH=arm64-v8a; CF_ARCH=arm64; TS_ARCH=arm64; SB_SHA="${SB_SHA256_ARM64}"; XR_SHA="${XR_SHA256_ARM64}"; CF_SHA="${CF_SHA256_ARM64}"; TS_SHA="${TS_SHA256_ARM64}" ;; \
       *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     curl -fsSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${SB_ARCH}-glibc.tar.gz"; \
     curl -fsSL -o xr.zip "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-${XR_ARCH}.zip"; \
     curl -fsSL -o cloudflared "https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-linux-${CF_ARCH}"; \
+    curl -fsSL -o ts.tgz "https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz"; \
     echo "${SB_SHA}  sb.tgz" | sha256sum -c -; \
     echo "${XR_SHA}  xr.zip" | sha256sum -c -; \
     echo "${CF_SHA}  cloudflared" | sha256sum -c -; \
+    echo "${TS_SHA}  ts.tgz" | sha256sum -c -; \
     mkdir -p /out; \
     tar -xzf sb.tgz --strip-components=1 -C /out --wildcards '*/sing-box'; \
     unzip -q -o xr.zip xray -d /out; \
+    tar -xzf ts.tgz --strip-components=1 -C /out --wildcards '*/tailscale' '*/tailscaled'; \
     install -m 0755 cloudflared /out/cloudflared; \
-    chmod 0755 /out/sing-box /out/xray; \
-    /out/sing-box version | head -n1; /out/xray version | head -n1; /out/cloudflared --version
+    chmod 0755 /out/sing-box /out/xray /out/tailscale /out/tailscaled; \
+    /out/sing-box version | head -n1; /out/xray version | head -n1; /out/cloudflared --version; /out/tailscale version | head -n1
 
 FROM debian:bookworm-slim
 RUN apt-get update \

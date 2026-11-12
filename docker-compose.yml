@@ -30,6 +30,11 @@ services:
       # SIGNAL_URL: ""            # e.g. https://vps:33443/report - POST ip/port/uri/time
       # SIGNAL_TOKEN: ""          # Bearer token of that signaling API
       # STUN_SERVERS: "stun.l.google.com:19302,stun.cloudflare.com:3478"
+      # --- Tailscale userspace mode (auto hole-punching + DERP fallback; clients join the same tailnet) ---
+      # TAILSCALE: "1"            # mutually exclusive with HY2_NAT
+      # TS_AUTHKEY: "tskey-auth-..."   # required on first start, state persists in /data/tailscale
+      # TS_LOGIN_SERVER: ""       # optional self-hosted Headscale
+      # TS_HOSTNAME: ""           # tailnet node name (default NODE_NAME)
       # HY2_PASSWORD / HY2_OBFS_PASSWORD / REALITY_UUID / ARGO_UUID: optional, random values are generated if unset
       # Stateless mode (no persistent /data): also REALITY_PRIVATE_KEY / REALITY_SID / ARGO_PATH / ARGO_DEC_KEY / ARGO_ENC_KEY
     volumes:

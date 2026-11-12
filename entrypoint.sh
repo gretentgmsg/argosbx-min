@@ -31,6 +31,14 @@ SIGNAL_URL="${SIGNAL_URL:-}"             # e.g. https://vps.example:33443/report
 SIGNAL_TOKEN="${SIGNAL_TOKEN:-}"         # Bearer token of that API
 STUN_SERVERS="${STUN_SERVERS:-stun.l.google.com:19302,stun.cloudflare.com:3478}"
 HY2_NAT_INTERNAL=18081                   # loopback port sing-box listens on in NAT mode
+# Tailscale userspace mode (--tun=userspace-networking): automatic NAT hole-punching with a DERP
+# fallback, no root / NET_ADMIN needed. Hysteria2 becomes reachable at the container's stable
+# 100.x.y.z tailnet address; clients must join the same tailnet (Tailscale or self-hosted Headscale).
+TAILSCALE="${TAILSCALE:-0}"              # 1 = enable
+TS_HOSTNAME="${TS_HOSTNAME:-$NODE_NAME}" # node name inside the tailnet
+TS_LOGIN_SERVER="${TS_LOGIN_SERVER:-}"   # optional Headscale coordination server
+TS_SOCK="/tmp/tailscaled.sock"           # writable path: survives read-only root filesystems
+TS_KEY="${TS_AUTHKEY:-}"; unset TS_AUTHKEY
 
 # The tunnel token never needs to be visible to child processes or `ps`: take it out of the environment now.
 CF_TOKEN="${ARGO_TOKEN:-}"; unset ARGO_TOKEN
@@ -56,6 +64,13 @@ is_host "$REALITY_SNI"  || die "invalid REALITY_SNI"
 [ -z "$SIGNAL_URL" ] || [[ "$SIGNAL_URL" =~ ^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "invalid SIGNAL_URL"
 [ -z "$SIGNAL_TOKEN" ] || [[ "$SIGNAL_TOKEN" =~ ^[A-Za-z0-9._:=+-]{8,256}$ ]] || die "invalid SIGNAL_TOKEN"
 [[ "$STUN_SERVERS" =~ ^[A-Za-z0-9.,:-]+$ ]] || die "invalid STUN_SERVERS"
+[[ "$TAILSCALE" =~ ^[01]$ ]] || die "TAILSCALE must be 0 or 1"
+if [ "$TAILSCALE" = 1 ]; then
+  [ "$HY2_PORT" != 0 ] || die "TAILSCALE=1 requires HY2_PORT != 0 (it exposes Hysteria2)"
+  [ "$HY2_NAT" = 0 ] || die "TAILSCALE=1 and HY2_NAT=1 are mutually exclusive"
+fi
+[ -z "$TS_LOGIN_SERVER" ] || [[ "$TS_LOGIN_SERVER" =~ ^https?://[A-Za-z0-9._:-]+/?$ ]] || die "invalid TS_LOGIN_SERVER"
+[[ "$TS_HOSTNAME" =~ ^[A-Za-z0-9-]{1,63}$ ]] || die "invalid TS_HOSTNAME (A-Za-z0-9- only; NODE_NAME default must comply)"
 [ -z "$ARGO_DOMAIN" ]  || is_host "$ARGO_DOMAIN"  || die "invalid ARGO_DOMAIN"
 [ -z "$ARGO_ADDRESS" ] || is_host "$ARGO_ADDRESS" || die "invalid ARGO_ADDRESS"
 [[ "$ARGO_LISTEN" =~ ^(127\.0\.0\.1|0\.0\.0\.0)$ ]] || die "ARGO_LISTEN must be 127.0.0.1 or 0.0.0.0"
@@ -343,6 +358,8 @@ while (1) {
 }
 PERL
     chmod 700 "$DATA_DIR/hy2-nat.pl"
+  elif [ "$TAILSCALE" = 1 ]; then
+    : # link is emitted after tailscaled reports the stable 100.x address (run section)
   else
     echo "hysteria2://$HY2_PW@$URL_HOST:$HY2_PORT/?$Q#$NODE_NAME-hy2" >> "$LINKS"
   fi
@@ -490,6 +507,44 @@ if [ "$ARGO" = 1 ] && [ "$RUN_CLOUDFLARED" = 1 ]; then
   fi
   PIDS+=("$CF_PID")
   unset CF_TOKEN
+fi
+
+# Tailscale userspace: pure userland (gVisor netstack), no root, no tun device. Inbound traffic
+# to the node's 100.x address on HY2_PORT is delivered to the local sing-box listener.
+if [ "$TAILSCALE" = 1 ]; then
+  mkdir -p "$DATA_DIR/tailscale"; chmod 700 "$DATA_DIR/tailscale" 2>/dev/null || true
+  { [ -n "$TS_KEY" ] || [ -s "$DATA_DIR/tailscale/tailscaled.state" ]; } \
+    || die "TAILSCALE=1 requires TS_AUTHKEY on first start (state persists in $DATA_DIR/tailscale afterwards)"
+  "$BIN_DIR/tailscaled" --tun=userspace-networking --statedir="$DATA_DIR/tailscale" \
+    --socket="$TS_SOCK" --port=0 &
+  PIDS+=($!)
+  for _ in $(seq 1 20); do [ -S "$TS_SOCK" ] && break; sleep 0.5; done
+  [ -S "$TS_SOCK" ] || die "tailscaled did not create its control socket"
+  TS_UP_ARGS=(--socket="$TS_SOCK" up --hostname="$TS_HOSTNAME" --accept-dns=false --timeout=45s)
+  [ -n "$TS_KEY" ] && TS_UP_ARGS+=(--auth-key="$TS_KEY")
+  [ -n "$TS_LOGIN_SERVER" ] && TS_UP_ARGS+=(--login-server="$TS_LOGIN_SERVER")
+  "$BIN_DIR/tailscale" "${TS_UP_ARGS[@]}" || echo "[warn] 'tailscale up' failed (bad key or login server?)" >&2
+  unset TS_KEY
+  TS_IP=""
+  for _ in $(seq 1 30); do
+    TS_IP="$("$BIN_DIR/tailscale" --socket="$TS_SOCK" ip -4 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    [[ "$TS_IP" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && break
+    TS_IP=""; sleep 1
+  done
+  if [ -n "$TS_IP" ]; then
+    TS_URI="hysteria2://$HY2_PW@$TS_IP:$HY2_PORT/?$Q#$NODE_NAME-ts-hy2"
+    echo "$TS_URI" >> "$LINKS"
+    echo "[ok] Tailscale userspace is up ($TS_IP); HY2 link added to $LINKS (address is stable across restarts)"
+    if [ -n "$SIGNAL_URL" ] && [ -n "$SIGNAL_TOKEN" ]; then
+      curl -fsS --max-time 15 -k -o /dev/null -X POST "$SIGNAL_URL" \
+        -H "Content-Type: application/json" -H "Authorization: Bearer $SIGNAL_TOKEN" \
+        -d "{\"ip\":\"$TS_IP\",\"port\":\"$HY2_PORT\",\"uri\":\"$TS_URI\",\"time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
+        && echo "[ok] tailnet HY2 link reported to the signaling server" \
+        || echo "[warn] failed to report the tailnet link to the signaling server" >&2
+    fi
+  else
+    echo "[warn] Tailscale started but no 100.x address was assigned (check TS_AUTHKEY / TS_LOGIN_SERVER)" >&2
+  fi
 fi
 
 # Quick tunnel: ask cloudflared for the hostname it was assigned, then publish the link.
