@@ -23,6 +23,14 @@ ARGO_PROTOCOL="${ARGO_PROTOCOL:-auto}"   # auto | http2 | quic
 NODE_NAME="${NODE_NAME:-node}"
 SERVER_HOST="${SERVER_HOST:-}"           # public IP/domain; auto-detected over HTTPS if empty
 METRICS_ADDR="127.0.0.1:20241"
+# UDP hole-punch mode (no public inbound port needed): a perl relay owns HY2_PORT, forwards to
+# sing-box on loopback, keeps the NAT mapping alive with STUN probes, and reports the public
+# mapping (plus the ready-to-import hysteria2 link) to a signaling server whenever it changes.
+HY2_NAT="${HY2_NAT:-0}"                  # 1 = enable
+SIGNAL_URL="${SIGNAL_URL:-}"             # e.g. https://vps.example:33443/report (POST ip/port/uri/time)
+SIGNAL_TOKEN="${SIGNAL_TOKEN:-}"         # Bearer token of that API
+STUN_SERVERS="${STUN_SERVERS:-stun.l.google.com:19302,stun.cloudflare.com:3478}"
+HY2_NAT_INTERNAL=18081                   # loopback port sing-box listens on in NAT mode
 
 # The tunnel token never needs to be visible to child processes or `ps`: take it out of the environment now.
 CF_TOKEN="${ARGO_TOKEN:-}"; unset ARGO_TOKEN
@@ -42,6 +50,12 @@ is_host "$REALITY_SNI"  || die "invalid REALITY_SNI"
 [[ "$HY2_OBFS" =~ ^[01]$ ]] || die "HY2_OBFS must be 0 or 1"
 [[ "$ARGO" =~ ^[01]$ ]]     || die "ARGO must be 0 or 1"
 [[ "$ARGO_PROTOCOL" =~ ^(auto|http2|quic)$ ]] || die "ARGO_PROTOCOL must be auto, http2 or quic"
+[[ "$HY2_NAT" =~ ^[01]$ ]] || die "HY2_NAT must be 0 or 1"
+[ "$HY2_NAT" = 0 ] || [ "$HY2_PORT" != 0 ] || die "HY2_NAT=1 requires HY2_PORT != 0"
+[ "$HY2_PORT" != "$HY2_NAT_INTERNAL" ] || die "HY2_PORT conflicts with the internal NAT port $HY2_NAT_INTERNAL"
+[ -z "$SIGNAL_URL" ] || [[ "$SIGNAL_URL" =~ ^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "invalid SIGNAL_URL"
+[ -z "$SIGNAL_TOKEN" ] || [[ "$SIGNAL_TOKEN" =~ ^[A-Za-z0-9._:=+-]{8,256}$ ]] || die "invalid SIGNAL_TOKEN"
+[[ "$STUN_SERVERS" =~ ^[A-Za-z0-9.,:-]+$ ]] || die "invalid STUN_SERVERS"
 [ -z "$ARGO_DOMAIN" ]  || is_host "$ARGO_DOMAIN"  || die "invalid ARGO_DOMAIN"
 [ -z "$ARGO_ADDRESS" ] || is_host "$ARGO_ADDRESS" || die "invalid ARGO_ADDRESS"
 [[ "$ARGO_LISTEN" =~ ^(127\.0\.0\.1|0\.0\.0\.0)$ ]] || die "ARGO_LISTEN must be 127.0.0.1 or 0.0.0.0"
@@ -138,6 +152,10 @@ if [ "$HY2_PORT" != 0 ]; then
   if [ "$HY2_OBFS" = 1 ]; then OBFS_JSON="\"obfs\": {\"type\": \"salamander\", \"password\": \"$OBFS_PW\"},"
   else MASQ_JSON="\"masquerade\": \"$MASQ_URL\","; fi
 
+  # NAT mode: the perl relay owns the public UDP port; sing-box hides on loopback behind it.
+  SB_HY2_LISTEN="::"; SB_HY2_PORTN=$HY2_PORT
+  if [ "$HY2_NAT" = 1 ]; then SB_HY2_LISTEN="127.0.0.1"; SB_HY2_PORTN=$HY2_NAT_INTERNAL; fi
+
   cat > "$DATA_DIR/sing-box.json" <<JSON
 {
   "log": { "level": "warn", "timestamp": true },
@@ -146,8 +164,8 @@ if [ "$HY2_PORT" != 0 ]; then
     {
       "type": "hysteria2",
       "tag": "hy2-in",
-      "listen": "::",
-      "listen_port": $HY2_PORT,
+      "listen": "$SB_HY2_LISTEN",
+      "listen_port": $SB_HY2_PORTN,
       "users": [ { "password": "$HY2_PW" } ],
       $OBFS_JSON
       $MASQ_JSON
@@ -182,7 +200,152 @@ JSON
     Q="$Q&pinSHA256=$PIN"
   fi
   [ "$HY2_OBFS" = 1 ] && Q="$Q&obfs=salamander&obfs-password=$OBFS_PW"
-  echo "hysteria2://$HY2_PW@$URL_HOST:$HY2_PORT/?$Q#$NODE_NAME-hy2" >> "$LINKS"
+
+  if [ "$HY2_NAT" = 1 ]; then
+    # hysteria2 link is emitted dynamically by the relay once the public mapping is known
+    cat > "$DATA_DIR/hy2-nat.pl" <<'PERL'
+use strict; use warnings;
+use Socket;
+$| = 1;   # autoflush: our log lines must reach docker logs immediately
+
+my $PORT     = $ENV{NAT_PORT}     || die "[nat] NAT_PORT missing\n";
+my $UP_PORT  = $ENV{NAT_UP_PORT}  || die "[nat] NAT_UP_PORT missing\n";
+my $UP_IP    = "127.0.0.1";
+my @STUN     = grep { length } split /\s*,\s*/, ($ENV{NAT_STUN} || "");
+my $LINKS    = $ENV{NAT_LINKS}    || "";
+my $URI      = $ENV{NAT_URI}      || "";
+my $REPORT   = $ENV{NAT_REPORT}   || "";
+my $TOKEN    = $ENV{NAT_TOKEN}    || "";
+my $INTERVAL = 20;
+my $IDLE     = 180;
+
+sub ts { my @t = gmtime(time); sprintf("%04d-%02d-%02dT%02d:%02d:%02dZ", $t[5]+1900, $t[4]+1, $t[3], $t[2], $t[1], $t[0]) }
+sub logm { print STDOUT "[nat] ", ts(), " @_\n"; }
+
+socket(my $main, PF_INET, SOCK_DGRAM, 17) or die "[nat] socket: $!\n";
+bind($main, sockaddr_in($PORT, INADDR_ANY)) or die "[nat] bind udp/$PORT: $!\n";
+logm "relay udp/$PORT -> $UP_IP:$UP_PORT";
+
+sub stun_servers {
+  my @out;
+  for my $s (@STUN) {
+    my ($h, $p) = $s =~ /^([A-Za-z0-9.-]+)(?::(\d+))?$/ or next;
+    my $ip = inet_aton($h) or next;
+    push @out, [$ip, $p || 3478];
+  }
+  @out;
+}
+sub stun_send {
+  my $pkt = "\x00\x01\x00\x00\x21\x12\xa4\x42\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc";
+  for my $srv (stun_servers()) { send($main, $pkt, 0, sockaddr_in($srv->[1], $srv->[0])) }
+}
+sub stun_parse {
+  my ($b) = @_;
+  return undef unless defined $b && length($b) >= 20 && substr($b, 4, 4) eq "\x21\x12\xa4\x42";
+  my $pos = 20;
+  while ($pos + 4 <= length($b)) {
+    my ($t, $l) = unpack("nn", substr($b, $pos, 4));
+    last if $pos + 4 + $l > length($b);
+    if ($t == 0x0020 || $t == 0x0001) {
+      my $v = substr($b, $pos + 4, $l);
+      next unless length($v) >= 7;
+      my ($p, $i) = unpack("xnN", $v);
+      if ($t == 0x0020) { $p ^= 0x2112; $i ^= 0x2112A442 }
+      return inet_ntoa(pack("N", $i)) . ":" . $p;
+    }
+    $pos += 4 + (($l + 3) & ~3);
+  }
+  undef;
+}
+sub write_link {
+  my ($uri) = @_;
+  return unless length($LINKS) && length($uri);
+  my @keep;
+  if (open(my $fh, "<", $LINKS)) { @keep = grep { !/^hysteria2:\/\// } <$fh>; close $fh }
+  if (open(my $o, ">", $LINKS))  { print $o @keep, "$uri\n"; close $o }
+}
+sub report {
+  my ($addr) = @_;
+  my ($ip, $p) = $addr =~ /^(\d+\.\d+\.\d+\.\d+):(\d+)$/ or return;
+  my $uri = $URI; $uri =~ s/%s/$addr/g;
+  logm "public mapping is now $addr";
+  write_link($uri);
+  return unless length $REPORT;
+  my $j = sprintf('{"ip":"%s","port":"%s","uri":"%s","time":"%s"}', $ip, $p, $uri, ts());
+  my @cmd = ("curl", "-fsS", "--max-time", "15", "-k", "-o", "/dev/null", "-X", "POST", $REPORT,
+             "-H", "Content-Type: application/json",
+             "-H", "Authorization: Bearer $TOKEN", "-d", $j);
+  logm(system(@cmd) == 0 ? "reported to signaling server" : "report to signaling server FAILED");
+}
+
+$SIG{PIPE} = "IGNORE";
+my %flows;      # "ip:port" -> { fh, ip, port, at }
+my %stun_peer;  # "ip:port" of known STUN servers -> 1
+$stun_peer{ inet_ntoa($_->[0]) . ":" . $_->[1] } = 1 for stun_servers();
+my $mapped  = "";
+my $pending = "";
+my $last_probe = 0;
+stun_send();
+$last_probe = time;
+
+while (1) {
+  my $rin = "";
+  vec($rin, fileno($main), 1) = 1;
+  for my $ca (keys %flows) { vec($rin, fileno($flows{$ca}{fh}), 1) = 1 }
+  my $timeout = $last_probe + $INTERVAL - time;
+  $timeout = 0.5 if $timeout <= 0;
+  my $n = select(my $rout = $rin, undef, undef, $timeout);
+  if (time - $last_probe >= $INTERVAL) { stun_send(); $last_probe = time }
+  if (!$n) {
+    for my $ca (keys %flows) {
+      if (time - $flows{$ca}{at} > $IDLE) {
+        my $fh = delete $flows{$ca}{fh}; close $fh if $fh;
+        delete $flows{$ca};
+      }
+    }
+    next;
+  }
+  if (vec($rout, fileno($main), 1)) {
+    my $from = recv($main, my $buf, 65535, 0);
+    next unless defined $from;
+    my ($cp, $ci) = sockaddr_in($from);
+    my $peer = inet_ntoa($ci) . ":" . $cp;
+    my $m = stun_parse($buf);
+    if (defined $m && $stun_peer{$peer}) {
+      # debounce: multi-line egress NATs can observe different mappings per STUN path;
+      # only switch (and report) after the same value is seen twice in a row.
+      if ($m ne $mapped) {
+        if ($m eq $pending || $mapped eq "") { $mapped = $m; report($m) }
+        else                                 { $pending = $m }
+      }
+      next;
+    }
+    next if $cp == $UP_PORT;                       # never relay loopback upstream chatter
+    my $ca = inet_ntoa($ci) . ":" . $cp;
+    my $f = $flows{$ca};
+    unless ($f) {
+      socket(my $tmp, PF_INET, SOCK_DGRAM, 17) or next;
+      $f = { fh => $tmp, ip => $ci, port => $cp, at => time };
+      $flows{$ca} = $f;
+      logm "new flow from $ca";
+    }
+    $f->{at} = time;
+    send($f->{fh}, $buf, 0, sockaddr_in($UP_PORT, inet_aton($UP_IP)));
+  }
+  for my $ca (keys %flows) {
+    my $f = $flows{$ca};
+    next unless vec($rout, fileno($f->{fh}), 1);
+    my $from = recv($f->{fh}, my $b, 65535, 0);
+    next unless defined $b && length $b;
+    $f->{at} = time;
+    send($main, $b, 0, sockaddr_in($f->{port}, $f->{ip}));
+  }
+}
+PERL
+    chmod 700 "$DATA_DIR/hy2-nat.pl"
+  else
+    echo "hysteria2://$HY2_PW@$URL_HOST:$HY2_PORT/?$Q#$NODE_NAME-hy2" >> "$LINKS"
+  fi
 fi
 
 # ======================= Xray: VLESS-Reality and/or VLESS-Encryption+XHTTP (Argo origin) =======================
@@ -305,6 +468,12 @@ echo "     docker exec <container> cat $LINKS"
 
 # ======================= run =======================
 if [ "$HY2_PORT" != 0 ]; then "$BIN_DIR/sing-box" run -c "$DATA_DIR/sing-box.json" & PIDS+=($!); fi
+if [ "$HY2_PORT" != 0 ] && [ "$HY2_NAT" = 1 ]; then
+  NAT_PORT="$HY2_PORT" NAT_UP_PORT="$HY2_NAT_INTERNAL" NAT_STUN="$STUN_SERVERS" \
+  NAT_LINKS="$LINKS" NAT_URI="hysteria2://$HY2_PW@%s/?$Q#$NODE_NAME-hy2" \
+  NAT_REPORT="$SIGNAL_URL" NAT_TOKEN="$SIGNAL_TOKEN" \
+    perl "$DATA_DIR/hy2-nat.pl" & PIDS+=($!)
+fi
 if [ -n "$XRAY_INBOUNDS" ]; then "$BIN_DIR/xray" run -c "$DATA_DIR/xray.json" & PIDS+=($!); fi
 if [ "$ARGO" = 1 ]; then
   CF_ARGS=(tunnel --no-autoupdate --protocol "$ARGO_PROTOCOL" --metrics "$METRICS_ADDR" --loglevel warn)

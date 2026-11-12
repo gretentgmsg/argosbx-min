@@ -34,6 +34,9 @@ docker exec proxy cat /data/links.txt   # 分享链接（含密钥，不会写�
 | `ARGO_LISTEN` | `127.0.0.1` | 设 `0.0.0.0` 当有 HTTPS 反代（如 PaaS 公开端点）直连该端口时 |
 | `ARGO_PUBLIC_DOMAIN` | 空 | 该反代的域名；设置后 links.txt 会额外生成一条不经 Cloudflare 的直连 vless 链接（需 `ARGO_LISTEN=0.0.0.0`） |
 | `ARGO_ADDRESS` | 空 | 可选：客户端连接用的优选 Cloudflare IP/域名 |
+| `STUN_SERVERS` | Google/Cloudflare STUN | UDP 打洞模式的 STUN 服务器列表（逗号分隔 host[:port]） |
+| `HY2_NAT` | `0` | `1` = UDP 打洞模式：perl 中继独占 `HY2_PORT`，20 秒 STUN 保活并把公网映射上报信令服务器，客户端经 NAT 映射直连（无需公网入站端口） |
+| `SIGNAL_URL` / `SIGNAL_TOKEN` | 空 | 信令服务器上报地址与 Bearer 令牌（`HY2_NAT=1` 时使用；POST `{"ip","port","uri","time"}`，客户端从其 `/target` 拉最新节点） |
 | `SERVER_HOST` | 自动 | 公网 IP 或域名；留空会通过 HTTPS 请求 api.ipify.org |
 | `NODE_NAME` | `node` | 节点备注名 |
 | `HY2_PASSWORD` `HY2_OBFS_PASSWORD` `REALITY_UUID` `ARGO_UUID` | 随机 | 可选覆盖，首次启动自动生成并保存在 `/data/secrets` |
@@ -104,6 +107,22 @@ docker run --rm --entrypoint /opt/bin/xray ghcr.io/gretentgmsg/argosbx-min:lates
 
   开启 Reality 时同理注入 `REALITY_UUID` / `REALITY_PRIVATE_KEY`（`xray x25519` 的 Private key）/ `REALITY_SID`。HY2 的自签证书含 pinSHA256，无持久卷时 pin 每次重启会变，建议 HY2 只在能持久化 `/data` 的环境使用，或挂载真实证书文件。
   密钥出现在平台环境变量里，注意控制面板访问权限。
+
+## HY2 UDP 直连（NAT 打洞模式，无公网入站端口）
+
+适用：容器平台不开放公网 UDP 入站、但允许出站 UDP（GCP 系 PaaS 的 Cloud NAT 若为端点无关映射即可用——判断方法：从同一 UDP 套接字向两个 STUN 服务器发包，映射出的公网 IP:端口一致）。
+
+```yaml
+HY2_PORT: "4433"     # perl 中继监听的 UDP 端口（>1024，容器内）
+HY2_NAT: "1"
+SIGNAL_URL: "https://你的VPS:33443/report"
+SIGNAL_TOKEN: "你的令牌"
+REALITY_PORT: "0"    # 无公网 TCP 入站的平台关闭
+```
+
+原理：perl 中继**独占** `HY2_PORT`（无需 SO_REUSEPORT——sing-box 与官方 hysteria 内核实测都不支持端口共享），sing-box 的 HY2 服务端退到 `127.0.0.1:18081` 由中继按客户端分流转发；中继每 20 秒从同一套接字向 STUN 发包保活 Cloud NAT 映射，映射变化时自动把 `ip/port/完整 hysteria2 链接` POST 到信令服务器并更新 links.txt。客户端从信令服务器的 `/target` 拉最新链接导入（v2rayN 等不支持自动拉取，需手动更新或用脚本）。
+
+注意：信令服务器需自备（POST `/report` 收 `{"ip","port","uri","time"}`，GET `/target` 返回最新值，Bearer 鉴权）；20 秒保活间隔按 GCP Cloud NAT 默认 30 秒 UDP 超时设计，超时更短的 NAT 需相应调小。
 
 ## 安全设计
 
