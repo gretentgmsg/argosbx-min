@@ -168,14 +168,25 @@ REALITY_PORT: "0"  ARGO: "0"  HY2_NAT: "0"   # TAILSCALE 与 HY2_NAT 互斥
 
 ## VPS 裸跑（无 Docker，适合 1c1g 小内存）
 
-不想为单个 HY2 付出 Docker 运行时（~150-200MB）的 VPS，直接用官方 sing-box 二进制 + systemd（裸跑约 60MB）：
+一个脚本装齐三通道（裸跑合计约 110MB，省掉 Docker 运行时的 150-200MB）：
+
+| 通道 | 进程 | 端口 | 说明 |
+|---|---|---|---|
+| Hysteria2 | sing-box | UDP `$PORT`（默认 443） | 自签证书 + pinSHA256 + salamander 混淆 |
+| VLESS-XHTTP + Encryption | xray | TCP `$XH_PORT`（默认 8443） | **security=none，加密由 VLESS Encryption（后量子）承担**；见下方说明 |
+| Argo 固定隧道（可选） | cloudflared | 无入站 | 复用同一 xray 的第二入站；需 `ARGO=1 ARGO_TOKEN=... ARGO_DOMAIN=...` |
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gretentgmsg/argosbx-min/main/scripts/vps-hy2-install.sh -o install.sh
-bash install.sh            # 默认 UDP 443；可 PORT=8443 SNI=xxx OBFS=0 覆盖
+# 基础安装（HY2 + VLESS-XHTTP 直连）
+bash vps-install.sh
+# 加 Argo 通道
+ARGO=1 ARGO_TOKEN=eyJ... ARGO_DOMAIN=x.example.com bash vps-install.sh
 ```
 
-自动完成：官方内核下载 + SHA256 校验、自签证书、随机密码（持久化在 `/opt/hy2/data`）、与容器完全相同的配置和链接格式（含 pinSHA256/混淆）、非 root systemd 服务（开机自启、崩溃自动拉起）。防火墙记得放行对应 **UDP** 端口。升级内核：`SB_VERSION=x.y.z SB_SHA256_AMD64=<sha> bash install.sh`。
+- 三内核与容器同版本同 SHA256 固定；密钥持久化在 `/opt/argosbx/data`，重跑不变；三个 systemd 服务非 root 运行 + 加固 + 崩溃自启
+- 结束时直接打印三条分享链接（也存 `data/links.txt`）；防火墙提醒见脚本输出（HY2 是 **UDP**、XHTTP 是 TCP）
+- **为什么直连 XHTTP 不套 TLS**：新版 Xray 已移除 `allowInsecure`，自签证书链接会坏；自签证书对裸 IP 的伪装价值有限，而 VLESS Encryption 本身就是带认证的端到端加密。走 Cloudflare 的 Argo 链接则由 CF 提供真实证书
+- 升级内核：`SB_VERSION=... XR_VERSION=... CF_VERSION=...`（配对应 `*_SHA256_*`）重跑脚本
 
 ## 升级内核版本
 
