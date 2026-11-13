@@ -166,6 +166,17 @@ REALITY_PORT: "0"  ARGO: "0"  HY2_NAT: "0"   # TAILSCALE 与 HY2_NAT 互斥
 
 进一步压缩：给容器加 `GOMEMLIMIT=48MiB`（或按需 32/64），xray/sing-box/cloudflared 三个 Go 进程会各自遵守软上限、更积极归还内存；代价是高负载时多花一点 CPU 做 GC。
 
+## VPS 裸跑（无 Docker，适合 1c1g 小内存）
+
+不想为单个 HY2 付出 Docker 运行时（~150-200MB）的 VPS，直接用官方 sing-box 二进制 + systemd（裸跑约 60MB）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gretentgmsg/argosbx-min/main/scripts/vps-hy2-install.sh -o install.sh
+bash install.sh            # 默认 UDP 443；可 PORT=8443 SNI=xxx OBFS=0 覆盖
+```
+
+自动完成：官方内核下载 + SHA256 校验、自签证书、随机密码（持久化在 `/opt/hy2/data`）、与容器完全相同的配置和链接格式（含 pinSHA256/混淆）、非 root systemd 服务（开机自启、崩溃自动拉起）。防火墙记得放行对应 **UDP** 端口。升级内核：`SB_VERSION=x.y.z SB_SHA256_AMD64=<sha> bash install.sh`。
+
 ## 升级内核版本
 
 同时修改 `Dockerfile` 里的版本号与对应 SHA256 后重新构建：
