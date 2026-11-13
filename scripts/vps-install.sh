@@ -16,6 +16,12 @@ PORT="${PORT:-443}"            # Hysteria2 UDP
 XH_PORT="${XH_PORT:-8443}"     # VLESS-XHTTP TCP (443/tcp often taken by nginx)
 SNI="${SNI:-www.bing.com}"
 OBFS="${OBFS:-1}"
+# Camouflage mode: set DOMAIN (A record -> this VPS, DNS-only!) to obtain a Let's Encrypt cert
+# via acme.sh. This forces obfs OFF (it would hide the real cert), enables HTTP/3 masquerade,
+# and upgrades the direct XHTTP channel to real TLS. Renewals auto-restart the services.
+DOMAIN="${DOMAIN:-}"
+CF_TOKEN="${CF_TOKEN:-}"       # Cloudflare API token (Zone.DNS Edit) -> DNS-01 issuance;
+                                # empty -> HTTP-01 standalone, requires a free TCP 80
 ARGO="${ARGO:-0}"; ARG0_UNUSED=0
 ARGO_TOKEN="${ARGO_TOKEN:-}"
 ARGO_DOMAIN="${ARGO_DOMAIN:-}"
@@ -53,6 +59,12 @@ if [ "$ARGO" = 1 ]; then
   [ -z "$ARGO_ADDRESS" ] || is_host "$ARGO_ADDRESS" || { echo "[error] bad ARGO_ADDRESS" >&2; exit 1; }
   [[ "$ARGO_PROTOCOL" =~ ^(auto|http2|quic)$ ]] || { echo "[error] bad ARGO_PROTOCOL" >&2; exit 1; }
 else ARGO=0; fi
+if [ -n "$DOMAIN" ]; then
+  is_host "$DOMAIN" || { echo "[error] bad DOMAIN" >&2; exit 1; }
+  SNI="$DOMAIN"
+  [ "$OBFS" = 1 ] && echo "[info] DOMAIN mode: obfs forced off (it would hide the real cert); masquerade covers probing"
+  OBFS=0
+fi
 
 echo "[1/7] prerequisites ..."
 if ! command -v curl >/dev/null || ! command -v unzip >/dev/null || ! command -v openssl >/dev/null; then
@@ -90,7 +102,33 @@ OBFS_PW="$(store hy2_obfs 24)"
 UUID="$( [ -s "$DIR/data/uuid" ] || tr -d '\n' < /proc/sys/kernel/random/uuid > "$DIR/data/uuid"; tr -d '\n' < "$DIR/data/uuid")"
 XH_PATH="/$(store xh_path 8)"
 CERT="$DIR/data/cert.pem"; KEY="$DIR/data/key.pem"
-if [ ! -s "$CERT" ] || [ ! -s "$KEY" ]; then
+cert_valid() {
+  [ -s "$CERT" ] && [ -s "$KEY" ] \
+    && openssl x509 -checkend 2592000 -noout -in "$CERT" >/dev/null 2>&1 \
+    && openssl x509 -in "$CERT" -noout -text 2>/dev/null | grep -qE "DNS:${DOMAIN//./\\.}([, ]|$)"
+}
+if [ -n "$DOMAIN" ] && ! cert_valid; then
+  echo "      obtaining a Let's Encrypt certificate for $DOMAIN ..."
+  RIP="$(curl -fsS --max-time 5 https://api.ipify.org || true)"
+  DIP="$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1; exit}')"
+  { [ -z "$RIP" ] || [ -z "$DIP" ] || [ "$RIP" = "$DIP" ]; } || \
+    echo "[warn] $DOMAIN resolves to $DIP but this host looks like $RIP - the A record must point here, DNS-only" >&2
+  ACME="$HOME/.acme.sh/acme.sh"
+  [ -x "$ACME" ] || curl -fsSL https://get.acme.sh | sh -s "admin@${DOMAIN#*.}" >/dev/null 2>&1
+  [ -x "$ACME" ] || { echo "[error] acme.sh installation failed" >&2; exit 1; }
+  if [ -n "$CF_TOKEN" ]; then
+    CF_Token="$CF_TOKEN" "$ACME" --issue --server letsencrypt --dns dns_cf -d "$DOMAIN" \
+      || { echo "[error] DNS-01 issuance failed (check CF_TOKEN / zone)" >&2; exit 1; }
+  else
+    ss -ltn 2>/dev/null | grep -q ':80 ' && { echo "[error] TCP 80 busy - free it or use CF_TOKEN (DNS-01)" >&2; exit 1; }
+    "$ACME" --issue --server letsencrypt --standalone -d "$DOMAIN" \
+      || { echo "[error] HTTP-01 issuance failed (A record direct/DNS-only? port 80 reachable?)" >&2; exit 1; }
+  fi
+  "$ACME" --install-cert -d "$DOMAIN" --ecc \
+    --fullchain-file "$CERT" --key-file "$KEY" \
+    --reloadcmd "chown $NAME: '$CERT' '$KEY'; chmod 600 '$KEY'; systemctl restart $NAME-hy2 $NAME-xh 2>/dev/null || true" \
+    || { echo "[error] certificate installation failed" >&2; exit 1; }
+elif [ -z "$DOMAIN" ] && { [ ! -s "$CERT" ] || [ ! -s "$KEY" ]; }; then
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -sha256 -days 3650 \
     -keyout "$KEY" -out "$CERT" -subj "/CN=$SNI" -addext "subjectAltName=DNS:$SNI" 2>/dev/null
 fi
@@ -133,9 +171,14 @@ JSON
 
 # ---------- 2) VLESS-XHTTP-Encryption direct (+ 3) Argo origin inbound) ----------
 echo "[5/7] Xray config (VLESS-XHTTP + VLESS Encryption) ..."
-# No TLS on the direct inbound: the self-signed cert adds little camouflage on a bare IP, Xray has
-# REMOVED allowInsecure (so self-signed links would break), and VLESS Encryption already provides
-# authenticated post-quantum end-to-end crypto. The Argo inbound relies on Cloudflare's real cert.
+# No TLS on the direct inbound without a domain: Xray removed allowInsecure (self-signed share
+# links would break) and VLESS Encryption already provides authenticated end-to-end crypto.
+# With DOMAIN set a real Let's Encrypt cert exists, so the inbound gets proper TLS for free.
+XH_TLS=""
+if [ -n "$DOMAIN" ]; then
+  XH_TLS='"security": "tls",
+        "tlsSettings": { "certificates": [ { "certificateFile": "'"$CERT"'", "keyFile": "'"$KEY"'" } ], "alpn": ["h2", "http/1.1"] },'
+fi
 ARGO_INBOUND=""
 if [ "$ARGO" = 1 ]; then
   ARGO_INBOUND=',{
@@ -157,7 +200,11 @@ cat > "$DIR/etc/xray.json" <<JSON
       "port": $XH_PORT,
       "protocol": "vless",
       "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "$ARGO_DEC" },
-      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$XH_PATH", "mode": "auto" } }
+      "streamSettings": {
+        "network": "xhttp",
+        $XH_TLS
+        "xhttpSettings": { "path": "$XH_PATH", "mode": "auto" }
+      }
     }$ARGO_INBOUND
   ],
   "outbounds": [
@@ -226,9 +273,15 @@ echo "[7/7] done. Share links (also saved to $DIR/data/links.txt):"
 IP="$(curl -fsS --max-time 5 https://api.ipify.org || echo YOUR_VPS_IP)"
 PIN="$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
 LINKS="$DIR/data/links.txt"; : > "$LINKS"
-Q="sni=$SNI&alpn=h3&insecure=0&pinSHA256=$PIN"; [ "$OBFS" = 1 ] && Q="$Q&obfs=salamander&obfs-password=$OBFS_PW"
+if [ -n "$DOMAIN" ]; then
+  Q="sni=$DOMAIN&alpn=h3&insecure=0"                        # real cert: no pin (rotates on renewal)
+  XH_TLS_Q="&security=tls&sni=$DOMAIN&fp=chrome"
+else
+  Q="sni=$SNI&alpn=h3&insecure=0&pinSHA256=$PIN"; [ "$OBFS" = 1 ] && Q="$Q&obfs=salamander&obfs-password=$OBFS_PW"
+  XH_TLS_Q=""
+fi
 echo "hysteria2://$HY2_PW@$IP:$PORT/?$Q#$NAME-hy2" | tee -a "$LINKS"
-echo "vless://$UUID@$IP:$XH_PORT?encryption=$ARGO_ENC&type=xhttp&path=%2F${XH_PATH#/}&mode=packet-up#$NAME-xh" | tee -a "$LINKS"
+echo "vless://$UUID@$IP:$XH_PORT?encryption=$ARGO_ENC$XH_TLS_Q&type=xhttp&path=%2F${XH_PATH#/}&mode=packet-up#$NAME-xh" | tee -a "$LINKS"
 if [ "$ARGO" = 1 ]; then
   ADDR="${ARGO_ADDRESS:-$ARGO_DOMAIN}"
   echo "vless://$UUID@$ADDR:443?encryption=$ARGO_ENC&security=tls&sni=$ARGO_DOMAIN&fp=chrome&alpn=h2&type=xhttp&host=$ARGO_DOMAIN&path=%2F${XH_PATH#/}&mode=packet-up#$NAME-argo" | tee -a "$LINKS"

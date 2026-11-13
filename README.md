@@ -181,8 +181,12 @@ REALITY_PORT: "0"  ARGO: "0"  HY2_NAT: "0"   # TAILSCALE 与 HY2_NAT 互斥
 bash vps-install.sh
 # 加 Argo 通道
 ARGO=1 ARGO_TOKEN=eyJ... ARGO_DOMAIN=x.example.com bash vps-install.sh
+# 最强伪装：真域名 + Let's Encrypt（伪装成 HTTP/3 网站；自动关 obfs、开 masquerade、直连 XHTTP 升级真 TLS）
+DOMAIN=hy2.example.com bash vps-install.sh            # HTTP-01 签发（需 TCP 80 空闲）
+CF_TOKEN=你的CF令牌 DOMAIN=hy2.example.com bash vps-install.sh   # DNS-01 签发（不依赖 80）
 ```
 
+- **DOMAIN 模式**：A 记录必须指向 VPS 且**仅 DNS（灰云）**；证书 60 天自动续期并重启服务；HY2 链接不再带 pin（防续期失效）、直连 XHTTP 链接带真 TLS。混淆与真证书互斥（obfs 会把证书一起盖掉），二选一
 - 三内核与容器同版本同 SHA256 固定；密钥持久化在 `/opt/argosbx/data`，重跑不变；三个 systemd 服务非 root 运行 + 加固 + 崩溃自启
 - 结束时直接打印三条分享链接（也存 `data/links.txt`）；防火墙提醒见脚本输出（HY2 是 **UDP**、XHTTP 是 TCP）
 - **为什么直连 XHTTP 不套 TLS**：新版 Xray 已移除 `allowInsecure`，自签证书链接会坏；自签证书对裸 IP 的伪装价值有限，而 VLESS Encryption 本身就是带认证的端到端加密。走 Cloudflare 的 Argo 链接则由 CF 提供真实证书
