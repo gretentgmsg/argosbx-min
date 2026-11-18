@@ -61,5 +61,5 @@ ENV XRAY_LOCATION_ASSET=/opt/bin
 ENV TINI_SUBREAPER=1
 USER 10001:10001
 VOLUME ["/data"]
-EXPOSE 443/tcp 443/udp
+EXPOSE 8443/tcp 8443/udp
 ENTRYPOINT ["/usr/bin/tini","--","/usr/local/bin/entrypoint.sh"]
