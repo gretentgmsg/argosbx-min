@@ -68,8 +68,20 @@ fi
 
 echo "[1/7] prerequisites ..."
 if ! command -v curl >/dev/null || ! command -v unzip >/dev/null || ! command -v openssl >/dev/null; then
-  apt-get update -qq && apt-get install -y -qq curl ca-certificates openssl unzip >/dev/null 2>&1
+  n=0
+  until apt-get update -qq && apt-get install -y -qq curl ca-certificates openssl unzip >/dev/null 2>&1; do
+    n=$((n+1))
+    if [ "$n" -ge 12 ]; then
+      echo "[error] apt stayed busy for 2 minutes (unattended-upgrades?). Wait for it or install manually:" >&2
+      echo "        apt-get install -y curl ca-certificates openssl unzip" >&2
+      exit 1
+    fi
+    echo "      apt busy (attempt $n/12), waiting 10s ..."
+    sleep 10
+  done
 fi
+command -v curl >/dev/null && command -v unzip >/dev/null && command -v openssl >/dev/null \
+  || { echo "[error] prerequisites missing (curl/unzip/openssl)" >&2; exit 1; }
 mkdir -p "$DIR/bin" "$DIR/etc" "$DIR/data"; chmod 700 "$DIR/data"
 
 # ---------- binaries: official releases, SHA256-pinned ----------
