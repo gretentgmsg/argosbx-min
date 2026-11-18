@@ -112,6 +112,8 @@ docker run --rm --entrypoint /opt/bin/xray ghcr.io/gretentgmsg/argosbx-min:lates
   开启 Reality 时同理注入 `REALITY_UUID` / `REALITY_PRIVATE_KEY`（`xray x25519` 的 Private key）/ `REALITY_SID`。HY2 的自签证书含 pinSHA256，无持久卷时 pin 每次重启会变，建议 HY2 只在能持久化 `/data` 的环境使用，或挂载真实证书文件。
   密钥出现在平台环境变量里，注意控制面板访问权限。
 
+  ARGO_DEC_KEY，ARGO_ENC_KEY 有xray生成一对，.\xray.exe vlessenc，然后只取 X25519 那一组的两个值，两者必须来自同一次生成，成对使用。格式均为 mlkem768x25519plus.native/.../xorpub/random... 开头
+
 ## HY2 UDP 直连（NAT 打洞模式，无公网入站端口）
 
 适用：容器平台不开放公网 UDP 入站、但允许出站 UDP（GCP 系 PaaS 的 Cloud NAT 若为端点无关映射即可用——判断方法：从同一 UDP 套接字向两个 STUN 服务器发包，映射出的公网 IP:端口一致）。
