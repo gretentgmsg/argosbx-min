@@ -58,6 +58,7 @@ is_host "$REALITY_SNI"  || die "invalid REALITY_SNI"
 [[ "$HY2_OBFS" =~ ^[01]$ ]] || die "HY2_OBFS must be 0 or 1"
 [[ "$ARGO" =~ ^[01]$ ]]     || die "ARGO must be 0 or 1"
 [[ "$ARGO_PROTOCOL" =~ ^(auto|http2|quic)$ ]] || die "ARGO_PROTOCOL must be auto, http2 or quic"
+[[ "${ARGO_EDGE_IP:-auto}" =~ ^(auto|4|6)$ ]] || die "ARGO_EDGE_IP must be auto, 4 or 6"
 [[ "$HY2_NAT" =~ ^[01]$ ]] || die "HY2_NAT must be 0 or 1"
 [ "$HY2_NAT" = 0 ] || [ "$HY2_PORT" != 0 ] || die "HY2_NAT=1 requires HY2_PORT != 0"
 [ "$HY2_PORT" != "$HY2_NAT_INTERNAL" ] || die "HY2_PORT conflicts with the internal NAT port $HY2_NAT_INTERNAL"
@@ -439,10 +440,12 @@ JSON
 fi
 
 if [ -n "$XRAY_INBOUNDS" ]; then
+  # queryStrategy=UseIPv4: hosts whose DNS returns AAAA but has no IPv6 egress (common on K8s PaaS)
+  # would otherwise burn the whole dial timeout on unreachable v6 addresses.
   cat > "$DATA_DIR/xray.json" <<JSON
 {
   "log": { "loglevel": "warning", "access": "none" },
-  "dns": { "servers": [ "localhost" ] },
+  "dns": { "servers": [ "localhost" ], "queryStrategy": "UseIPv4" },
   "inbounds": [
 $XRAY_INBOUNDS
   ],
@@ -499,7 +502,18 @@ if [ "$HY2_PORT" != 0 ] && [ "$HY2_NAT" = 1 ]; then
 fi
 if [ -n "$XRAY_INBOUNDS" ]; then "$BIN_DIR/xray" run -c "$DATA_DIR/xray.json" & PIDS+=($!); fi
 if [ "$ARGO" = 1 ] && [ "$RUN_CLOUDFLARED" = 1 ]; then
-  CF_ARGS=(tunnel --no-autoupdate --protocol "$ARGO_PROTOCOL" --metrics "$METRICS_ADDR" --loglevel warn)
+  # Clusters that resolve AAAA but have no IPv6 egress make cloudflared chase dead v6 edge addresses
+  # (symptom: connections flapping, "connection with edge closed"). Probe once; pin IPv4 when unusable.
+  EDGE_IP="${ARGO_EDGE_IP:-}"
+  if [ -z "$EDGE_IP" ]; then
+    if curl -6 -ks -o /dev/null --max-time 3 https://[2606:4700:4700::1111]/ 2>/dev/null; then
+      EDGE_IP=auto
+    else
+      EDGE_IP=4
+      echo "[info] IPv6 egress unusable: forcing cloudflared --edge-ip-version 4" >&2
+    fi
+  fi
+  CF_ARGS=(tunnel --no-autoupdate --protocol "$ARGO_PROTOCOL" --edge-ip-version "$EDGE_IP" --metrics "$METRICS_ADDR" --loglevel warn)
   if [ -n "$CF_TOKEN" ]; then
     TUNNEL_TOKEN="$CF_TOKEN" "$BIN_DIR/cloudflared" "${CF_ARGS[@]}" run & CF_PID=$!      # token via env, not argv
   else

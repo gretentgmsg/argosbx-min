@@ -74,6 +74,8 @@ HY2_PORT=0  REALITY_PORT=0  ARGO=1
 
 **国内 / UDP 受限网络必读**：cloudflared 默认 `ARGO_PROTOCOL=auto`（优先 QUIC/UDP）。若你的网络 UDP 到 Cloudflare 劣化（症状：隧道时通时断、真连接测试超时但偶发能通、容器日志反复出现 `failed to accept QUIC stream: timeout`），请设置 `ARGO_PROTOCOL=http2` 强制走 TCP 443，实测可解决。另外：把代理服务端跑在墙内网络时，`v2rayN 真连接测试`（默认目标 www.google.com）必然失败——出口在墙内，请用国内可达站点（如 baidu.com）测试。
 
+**IPv6 出网残废的平台**：部分平台（如 cloady 等 K8s PaaS）的 DNS 正常返回 AAAA 记录、但实际无 IPv6 出网——cloudflared 会反复去连不通的 v6 边缘地址（症状：`connection with edge closed` 反复出现、隧道半死不活），Xray 出站也会先撞 v6 导致真连接测试全部超时。启动时会自动探测 IPv6 出网，不通则自动加 `--edge-ip-version 4` 并让 Xray 仅按 IPv4 解析；可用 `ARGO_EDGE_IP=4|6|auto` 覆盖。
+
 Argo 路径使用 **VLESS Encryption + XHTTP**：
 
 - VLESS Encryption 是端到端加密（X25519 认证、ML-KEM-768 后量子密钥交换、前向保密），Cloudflare 终止 TLS 后也只能看到密文。密钥对由 Xray 自己生成（`xray vlessenc`），保存在 `/data/secrets/argo_dec`（服务端私密）和 `argo_enc`（客户端公开串）。
