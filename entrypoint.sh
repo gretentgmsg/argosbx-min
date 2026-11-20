@@ -59,6 +59,7 @@ is_host "$REALITY_SNI"  || die "invalid REALITY_SNI"
 [[ "$ARGO" =~ ^[01]$ ]]     || die "ARGO must be 0 or 1"
 [[ "$ARGO_PROTOCOL" =~ ^(auto|http2|quic)$ ]] || die "ARGO_PROTOCOL must be auto, http2 or quic"
 [[ "${ARGO_EDGE_IP:-auto}" =~ ^(auto|4|6)$ ]] || die "ARGO_EDGE_IP must be auto, 4 or 6"
+[ -z "${XRAY_DNS:-}" ] || [[ "$XRAY_DNS" =~ ^(localhost|https?://[A-Za-z0-9._:/-]+)$ ]] || die "XRAY_DNS must be 'localhost' or an http(s) URL"
 [[ "$HY2_NAT" =~ ^[01]$ ]] || die "HY2_NAT must be 0 or 1"
 [ "$HY2_NAT" = 0 ] || [ "$HY2_PORT" != 0 ] || die "HY2_NAT=1 requires HY2_PORT != 0"
 [ "$HY2_PORT" != "$HY2_NAT_INTERNAL" ] || die "HY2_PORT conflicts with the internal NAT port $HY2_NAT_INTERNAL"
@@ -442,10 +443,21 @@ fi
 if [ -n "$XRAY_INBOUNDS" ]; then
   # queryStrategy=UseIPv4: hosts whose DNS returns AAAA but has no IPv6 egress (common on K8s PaaS)
   # would otherwise burn the whole dial timeout on unreachable v6 addresses.
+  # DoH to a literal IP avoids the cluster resolver (CoreDNS on PaaS can flap, stalling all dials);
+  # XRAY_DNS overrides the reachability probe.
+  XDNS="${XRAY_DNS:-}"
+  if [ -z "$XDNS" ]; then
+    if curl -4 -ks -o /dev/null --max-time 3 https://1.1.1.1/ 2>/dev/null; then
+      XDNS="https://1.1.1.1/dns-query"
+      echo "[info] xray DNS via DoH (1.1.1.1)" >&2
+    else
+      XDNS="localhost"
+    fi
+  fi
   cat > "$DATA_DIR/xray.json" <<JSON
 {
   "log": { "loglevel": "warning", "access": "none" },
-  "dns": { "servers": [ "localhost" ], "queryStrategy": "UseIPv4" },
+  "dns": { "servers": [ "$XDNS" ], "queryStrategy": "UseIPv4" },
   "inbounds": [
 $XRAY_INBOUNDS
   ],
