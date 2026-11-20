@@ -78,6 +78,8 @@ HY2_PORT=0  REALITY_PORT=0  ARGO=1
 
 **集群 DNS 不稳的平台**：cloady 等平台的 CoreDNS 会间歇性 i/o timeout（cloudflared 日志 `Failed to initialize/refresh DNS local resolver`），期间 cloudflared 靠自动重试恢复（该版本无 `--edge` 参数，边缘发现无法绕开 DNS）。Xray 出站默认改走 DoH（探测 `1.1.1.1:443` 可达即用 `https://1.1.1.1/dns-query`），不再依赖集群 DNS；`XRAY_DNS=localhost` 可回退系统解析。
 
+**cloady 平台限制（2026-11 实测，只适合跑 Argo）**：① 入口按 Host 路由但只透传 GET 类请求，XHTTP 的上传 POST 会被入口用 Go 默认 404 挡下（对照实验：同一 POST 走 Argo 隧道返回 xray 的 400+x-padding）→ `ARGO_PUBLIC_DOMAIN` 反代直连模式不可用；② UDP 端点只挂在 AAAA-only 域名上（无 A 记录），客户端网络到它无 IPv6 路由时 HY2 不可达（入口的 A 型 IP 无 UDP 响应）；③ 自定义域 CNAME 到平台不会签发证书，入口只回 `*.cloady.io` 证书（SNI 不匹配 x509 报错）。结论：该平台用 `HY2_PORT=0` + `ARGO=1` 纯隧道模式。
+
 Argo 路径使用 **VLESS Encryption + XHTTP**：
 
 - VLESS Encryption 是端到端加密（X25519 认证、ML-KEM-768 后量子密钥交换、前向保密），Cloudflare 终止 TLS 后也只能看到密文。密钥对由 Xray 自己生成（`xray vlessenc`），保存在 `/data/secrets/argo_dec`（服务端私密）和 `argo_enc`（客户端公开串）。
