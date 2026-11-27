@@ -283,6 +283,9 @@ fi
 # ---------- share links ----------
 echo "[7/7] done. Share links (also saved to $DIR/data/links.txt):"
 IP="$(curl -fsS --max-time 5 https://api.ipify.org || echo YOUR_VPS_IP)"
+DIRECT_ADDR="${DOMAIN:-$IP}"                                # DOMAIN mode: address by name (survives an IP
+                                                             # change; TLS still validates via SNI). Prefer the
+                                                             # $IP form if your local resolver may be poisoned.
 PIN="$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
 LINKS="$DIR/data/links.txt"; : > "$LINKS"
 if [ -n "$DOMAIN" ]; then
@@ -292,8 +295,8 @@ else
   Q="sni=$SNI&alpn=h3&insecure=0&pinSHA256=$PIN"; [ "$OBFS" = 1 ] && Q="$Q&obfs=salamander&obfs-password=$OBFS_PW"
   XH_TLS_Q=""
 fi
-echo "hysteria2://$HY2_PW@$IP:$PORT/?$Q#$NAME-hy2" | tee -a "$LINKS"
-echo "vless://$UUID@$IP:$XH_PORT?encryption=$ARGO_ENC$XH_TLS_Q&type=xhttp&path=%2F${XH_PATH#/}&mode=packet-up#$NAME-xh" | tee -a "$LINKS"
+echo "hysteria2://$HY2_PW@$DIRECT_ADDR:$PORT/?$Q#$NAME-hy2" | tee -a "$LINKS"
+echo "vless://$UUID@$DIRECT_ADDR:$XH_PORT?encryption=$ARGO_ENC$XH_TLS_Q&type=xhttp&path=%2F${XH_PATH#/}&mode=packet-up#$NAME-xh" | tee -a "$LINKS"
 if [ "$ARGO" = 1 ]; then
   ADDR="${ARGO_ADDRESS:-$ARGO_DOMAIN}"
   echo "vless://$UUID@$ADDR:443?encryption=$ARGO_ENC&security=tls&sni=$ARGO_DOMAIN&fp=chrome&alpn=h2&type=xhttp&host=$ARGO_DOMAIN&path=%2F${XH_PATH#/}&mode=packet-up#$NAME-argo" | tee -a "$LINKS"
